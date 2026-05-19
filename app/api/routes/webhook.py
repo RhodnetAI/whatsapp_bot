@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import datetime
 import logging
 from typing import Any
@@ -53,13 +54,6 @@ async def _generate_response_and_update(
     """Background task: generate AI response (flow or knowledge) and update conversation asynchronously."""
     db_client = _conversation_client()
     
-    # Send typing indicator to show bot is generating response
-    try:
-        send_whatsapp_typing_indicator(sender)
-        logger.debug("Sent typing indicator while generating response for sender=%s", sender)
-    except Exception:
-        logger.debug("Failed to send typing indicator during response generation for sender=%s", sender)
-    
     try:
         # Load flow builder state
         flow_builder = None
@@ -78,6 +72,7 @@ async def _generate_response_and_update(
             logger.exception("Failed to load flow builder state")
         
         ai_reply: str = ""
+        updated_flow_state: dict[str, Any] | None = None
         flow_enabled = should_use_flow(flow_builder)
         
         if flow_enabled:
@@ -200,11 +195,11 @@ async def process_message(data: Any) -> None:
 
     logger.debug("Message ID: %s, Sender: %s", message_id, sender)
 
-    # Send typing indicator to show bot is processing
-    if isinstance(sender, str) and sender:
+    # Send typing indicator to show the bot is processing the received message
+    if isinstance(sender, str) and sender and isinstance(message_id, str):
         logger.info("Sending typing indicator for incoming message from sender=%s", sender)
         try:
-            send_whatsapp_typing_indicator(sender)
+            send_whatsapp_typing_indicator(message_id)
             logger.info("Typing indicator sent successfully")
         except Exception:
             logger.exception("Error sending typing indicator for sender=%s", sender)
@@ -293,14 +288,20 @@ async def process_message(data: Any) -> None:
             logger.exception("Failed to load flow builder state during message append")
 
         if should_use_flow(flow_builder):
-            # Initialize flow state for new conversations
             if not conversation_data:
+                # First flow message in this conversation
                 message_entry["flow_state"] = {
                     "started": False,
                     "current_question_index": 0,
                     "answers": {},
                     "completed": False,
                 }
+            else:
+                # Preserve existing flow state from the previous conversation turn
+                previous_entry = conversation_data[-1]
+                previous_flow_state = previous_entry.get("flow_state")
+                if isinstance(previous_flow_state, dict):
+                    message_entry["flow_state"] = copy.deepcopy(previous_flow_state)
 
         conversation_data.append(message_entry)
 
