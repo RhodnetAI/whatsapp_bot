@@ -139,6 +139,20 @@ async def process_message(data: Any) -> None:
 
     sender = message.get("from")
     message_id = message.get("id")
+    
+    # Send typing indicator for ANY incoming message (text, media, etc)
+    # This should be done before validating message content
+    if message_id and isinstance(sender, str):
+        logger.info("Sending typing indicator for message_id=%s, sender=%s", message_id, sender)
+        try:
+            typing_response = send_whatsapp_typing_indicator(message_id)
+            logger.info("Typing indicator response: status=%s", typing_response.status_code)
+            if typing_response.status_code >= 400:
+                logger.warning("Failed to send typing indicator: %s", typing_response.text)
+        except Exception:
+            logger.exception("Error sending typing indicator for message_id=%s", message_id)
+    
+    # Now extract text for text messages only
     text = ""
     text_field = message.get("text")
     if isinstance(text_field, dict):
@@ -149,15 +163,6 @@ async def process_message(data: Any) -> None:
 
     if not sender.startswith("+"):
         sender = f"+{sender}"
-
-    # Send typing indicator to show the user we're processing their message
-    if message_id:
-        try:
-            typing_response = send_whatsapp_typing_indicator(message_id)
-            if typing_response.status_code >= 400:
-                logger.warning("Failed to send typing indicator: %s", typing_response.text)
-        except Exception:
-            logger.exception("Error sending typing indicator for message_id=%s", message_id)
 
     # Parallelize database queries: check blocked status + fetch existing conversation
     db_client = _conversation_client()

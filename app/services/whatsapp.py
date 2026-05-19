@@ -1,6 +1,9 @@
+import logging
 import requests
 
 from app.core.config import settings
+
+logger = logging.getLogger("whatsapp")
 
 
 def send_whatsapp_text(sender: str, message: str) -> requests.Response:
@@ -37,4 +40,7 @@ def send_whatsapp_typing_indicator(message_id: str) -> requests.Response:
             "type": "text"
         }
     }
-    return requests.post(url, headers=headers, json=payload, timeout=20)
+    logger.debug("Sending typing indicator with payload: %s", payload)
+    response = requests.post(url, headers=headers, json=payload, timeout=20)
+    logger.debug("Typing indicator API response: status=%s, body=%s", response.status_code, response.text)
+    return response
