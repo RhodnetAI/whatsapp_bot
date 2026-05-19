@@ -15,6 +15,10 @@ router = APIRouter(tags=["webhook"])
 logger = logging.getLogger("whatsapp")
 
 
+def _conversation_client() -> Any:
+    return supabase_admin if supabase_admin is not None else supabase
+
+
 @router.get("/webhook")
 async def verify(request: Request) -> int | dict[str, str]:
     mode = request.query_params.get("hub.mode")
@@ -32,6 +36,73 @@ async def receive_message(request: Request) -> dict[str, str]:
     logger.info("Webhook received")
     await process_message(data)
     return {"status": "received"}
+
+
+async def _generate_response_and_update(
+    sender: str,
+    text: str,
+    record_id: str | None,
+    conversation_data: list[dict[str, Any]],
+) -> None:
+    """Background task: generate AI response and update conversation asynchronously."""
+    db_client = _conversation_client()
+    
+    try:
+        # Load setup config
+        setup_config: dict[str, str] = {
+            "main_instruction": "",
+            "dos": "",
+            "donts": "",
+        }
+        try:
+            config_res = (
+                supabase.table("service_agent_setup")
+                .select("main_instruction,dos,donts")
+                .eq("id", 1)
+                .limit(1)
+                .execute()
+            )
+            config_row = first_row(config_res) or {}
+            if isinstance(config_row, dict):
+                setup_config = {
+                    "main_instruction": config_row.get("main_instruction") or "",
+                    "dos": config_row.get("dos") or "",
+                    "donts": config_row.get("donts") or "",
+                }
+        except Exception:
+            logger.exception("Failed to load setup configuration for webhook response")
+
+        # Generate AI response
+        ai_reply = await answer_query_from_knowledge(text, setup_config=setup_config)
+        if conversation_data and isinstance(conversation_data[-1], dict):
+            conversation_data[-1]["response"] = ai_reply
+
+        # Update database with response
+        if record_id:
+            db_client.table("whatsapp_conversations").update(
+                {
+                    "conversation": conversation_data,
+                    "updated_at": datetime.datetime.utcnow().isoformat(),
+                }
+            ).eq("id", record_id).execute()
+        else:
+            db_client.table("whatsapp_conversations").update(
+                {
+                    "conversation": conversation_data,
+                    "updated_at": datetime.datetime.utcnow().isoformat(),
+                }
+            ).eq("sender", sender).execute()
+
+        # Send WhatsApp response
+        try:
+            meta_response = send_whatsapp_text(sender, ai_reply)
+            if meta_response.status_code >= 400:
+                logger.error("Meta send error %s: %s", meta_response.status_code, meta_response.text)
+        except Exception:
+            logger.exception("Meta send failure for sender=%s", sender)
+
+    except Exception:
+        logger.exception("Background response generation failed for sender=%s", sender)
 
 
 async def process_message(data: Any) -> None:
@@ -79,7 +150,7 @@ async def process_message(data: Any) -> None:
         sender = f"+{sender}"
 
     # Parallelize database queries: check blocked status + fetch existing conversation
-    db_client = supabase_admin if supabase_admin else supabase
+    db_client = _conversation_client()
 
     async def get_blocked_status():
         try:
@@ -112,7 +183,6 @@ async def process_message(data: Any) -> None:
     if is_blocked:
         return
 
-
     conversation_data: list[dict[str, Any]] = []
     record_id = None
 
@@ -123,19 +193,7 @@ async def process_message(data: Any) -> None:
         if not isinstance(conversation_data, list):
             conversation_data = []
 
-    messages_for_ai: list[dict[str, str]] = [
-        {"role": "system", "content": "You are a helpful WhatsApp assistant."}
-    ]
-    for c in conversation_data:
-        query = c.get("query", "") if isinstance(c, dict) else ""
-        response = c.get("response", "") if isinstance(c, dict) else ""
-        if isinstance(query, str):
-            messages_for_ai.append({"role": "user", "content": query})
-        if isinstance(response, str):
-            messages_for_ai.append({"role": "assistant", "content": response})
-
-    messages_for_ai.append({"role": "user", "content": text})
-
+    # Append incoming query with empty response (will be filled by background task)
     try:
         now_iso = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
         conversation_data.append({"query": text, "response": "", "time": now_iso})
@@ -159,68 +217,8 @@ async def process_message(data: Any) -> None:
         record_id = upserted_row.get("id") if upserted_row else None
     except Exception:
         logger.exception("Failed to persist incoming user message for sender=%s", sender)
+        return
 
-    setup_config: dict[str, str] = {
-        "main_instruction": "",
-        "dos": "",
-        "donts": "",
-    }
-    try:
-        config_res = (
-            supabase.table("service_agent_setup")
-            .select("main_instruction,dos,donts")
-            .eq("id", 1)
-            .limit(1)
-            .execute()
-        )
-        config_row = first_row(config_res) or {}
-        if isinstance(config_row, dict):
-            setup_config = {
-                "main_instruction": config_row.get("main_instruction") or "",
-                "dos": config_row.get("dos") or "",
-                "donts": config_row.get("donts") or "",
-            }
-    except Exception:
-        logger.exception("Failed to load setup configuration for webhook response")
-
-    ai_reply = await answer_query_from_knowledge(text, setup_config=setup_config)
-
-    try:
-        if conversation_data:
-            conversation_data[-1]["response"] = ai_reply
-
-        if record_id:
-            (
-                supabase.table("whatsapp_conversations")
-                .update(
-                    {
-                        "conversation": conversation_data,
-                        "updated_at": datetime.datetime.utcnow().isoformat(),
-                        "unread": True,
-                    }
-                )
-                .eq("id", record_id)
-                .execute()
-            )
-        else:
-            (
-                supabase.table("whatsapp_conversations")
-                .update(
-                    {
-                        "conversation": conversation_data,
-                        "updated_at": datetime.datetime.utcnow().isoformat(),
-                        "unread": True,
-                    }
-                )
-                .eq("sender", sender)
-                .execute()
-            )
-    except Exception:
-        logger.exception("Failed to persist assistant response for sender=%s", sender)
-
-    try:
-        meta_response = send_whatsapp_text(sender, ai_reply)
-        if meta_response.status_code >= 400:
-            logger.error("Meta send error %s: %s", meta_response.status_code, meta_response.text)
-    except Exception:
-        logger.exception("Meta send failure for sender=%s", sender)
+    # Spawn background task to generate response and update database
+    # This allows the webhook to return immediately (within 3 seconds per WhatsApp spec)
+    asyncio.create_task(_generate_response_and_update(sender, text, record_id, conversation_data))
