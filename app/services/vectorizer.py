@@ -339,7 +339,7 @@ async def search_vectors(query: str, top_k: int = 4) -> list[dict[str, Any]]:
             search_results = await client.query_points(
                 collection_name=QDRANT_COLLECTION,
                 query=query_embedding,
-                vector_name=QDRANT_VECTOR_NAME,
+                using=QDRANT_VECTOR_NAME,
                 limit=top_k,
                 with_payload=True,
             )

@@ -144,13 +144,16 @@ async def process_message(data: Any) -> None:
         # Use UPSERT to avoid race conditions with duplicate key errors
         upsert_res = (
             db_client.table("whatsapp_conversations")
-            .upsert({
-                "sender": sender,
-                "client_name": sender,  # Use phone number as default client name
-                "conversation": conversation_data,
-                "updated_at": datetime.datetime.utcnow().isoformat(),
-                "unread": True,
-            })
+            .upsert(
+                {
+                    "sender": sender,
+                    "client_name": sender,  # Use phone number as default client name
+                    "conversation": conversation_data,
+                    "updated_at": datetime.datetime.utcnow().isoformat(),
+                    "unread": True,
+                },
+                on_conflict="sender",
+            )
             .execute()
         )
         upserted_row = first_row(upsert_res)

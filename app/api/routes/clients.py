@@ -85,7 +85,15 @@ async def get_clients(auth: dict[str, Any] = Depends(verify_token)) -> dict[str,
 async def get_messages(sender: str, auth: dict[str, Any] = Depends(verify_token)) -> dict[str, Any]:
     _ = auth
     result = supabase.table("whatsapp_conversations").select("*").eq("sender", sender).execute()
-    return {"conversation": result.data}
+    conversation_rows: list[dict[str, Any]] = []
+    for row in result.data or []:
+        if not isinstance(row, dict):
+            continue
+        normalized_row = dict(row)
+        if not isinstance(normalized_row.get("conversation"), list):
+            normalized_row["conversation"] = []
+        conversation_rows.append(normalized_row)
+    return {"conversation": conversation_rows}
 
 
 @router.post("/send_message")
@@ -159,7 +167,10 @@ async def send_message(
     else:
         insert_res = (
             supabase.table("whatsapp_conversations")
-            .insert({"sender": sender, "conversation": conversation_data})
+            .upsert(
+                {"sender": sender, "conversation": conversation_data},
+                on_conflict="sender",
+            )
             .execute()
         )
         inserted_row = first_row(insert_res)
