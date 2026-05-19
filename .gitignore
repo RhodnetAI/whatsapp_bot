@@ -1,0 +1,136 @@
+# ============================================================================
+# PYTHON - Bytecode, caches, and environments
+# ============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+Venv/
+.venv3/
+env.bak/
+venv.bak/
+
+# ============================================================================
+# TESTING & COVERAGE
+# ============================================================================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.cache/
+
+# ============================================================================
+# ENVIRONMENT & SECRETS
+# ============================================================================
+.env
+.env.local
+.env.*.local
+.env.prod
+token.txt
+*.pem
+*.key
+*.p12
+secrets.json
+credentials.json
+config.local.yaml
+
+# ============================================================================
+# PROJECT-SPECIFIC DATA & LOGS
+# ============================================================================
+# Knowledge base / vector store local files
+app/data/knowledge_vectors.json
+app/data/*.json
+app/data/*.db
+
+# Logs and runtime files
+logs/
+*.log
+*.pid
+*.sock
+
+# Database dumps and backups
+*.sql.gz
+*.backup
+*.dump
+database_exports/
+
+# ============================================================================
+# EDITORS & IDEs
+# ============================================================================
+.vscode/
+.idea/
+*.code-workspace
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+.project
+.pydevproject
+.settings/
+
+# ============================================================================
+# OS-SPECIFIC FILES
+# ============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ============================================================================
+# BUILD & DEPENDENCY LOCK FILES
+# ============================================================================
+# Uncomment if you want to commit lock files:
+# uv.lock
+# poetry.lock
+# Pipfile.lock
+
+# ============================================================================
+# IDE Generated Files
+# ============================================================================
+*.sublime-project
+*.sublime-workspace
+
+# ============================================================================
+# MISC TEMP FILES
+# ============================================================================
+*.tmp
+~$*
+*.temp
+.env.bak
+
