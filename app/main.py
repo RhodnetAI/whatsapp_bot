@@ -29,6 +29,7 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5174",
         "https://whatsapp-1-dtig.onrender.com",
+        "https://whatsapp-bot-qwpw.onrender.com",
     ],
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
