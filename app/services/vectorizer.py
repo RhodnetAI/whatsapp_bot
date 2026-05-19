@@ -334,21 +334,28 @@ async def search_vectors(query: str, top_k: int = 4) -> list[dict[str, Any]]:
     client = await _get_qdrant_client()
     if client is not None and qmodels is not None:
         await _ensure_qdrant_collection(client)
-        search_results = await client.search(
-            collection_name=QDRANT_COLLECTION,
-            query_vector=(QDRANT_VECTOR_NAME, query_embedding),
-            limit=top_k,
-            with_payload=True,
-        )
-        return [
-            {
-                **(result.payload or {}),
-                "score": getattr(result, "score", 0.0),
-                "vector": getattr(result, "vector", []),
-            }
-            for result in search_results
-            if result.payload
-        ]
+        try:
+            # Use query() method which supports named vectors in async client
+            search_results = await client.query(
+                collection_name=QDRANT_COLLECTION,
+                query=query_embedding,
+                vector_name=QDRANT_VECTOR_NAME,
+                limit=top_k,
+                with_payload=True,
+            )
+            return [
+                {
+                    **(result.payload or {}),
+                    "score": getattr(result, "score", 0.0),
+                }
+                for result in search_results
+                if result.payload
+            ]
+        except Exception as e:
+            # Fallback to local search if Qdrant fails
+            import logging
+            logging.getLogger("whatsapp").exception(f"Qdrant search failed: {e}")
+            pass
 
     items = _load_vector_store()
     scored: list[tuple[float, dict[str, Any]]] = []

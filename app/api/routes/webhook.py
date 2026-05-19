@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import logging
 from typing import Any
@@ -77,26 +78,38 @@ async def process_message(data: Any) -> None:
     if not sender.startswith("+"):
         sender = f"+{sender}"
 
-    try:
-        blocked_check = (
-            supabase.table("whatsapp_conversations")
-            .select("blocked")
-            .eq("sender", sender)
-            .limit(1)
-            .execute()
-        )
-        blocked_row = first_row(blocked_check)
-        if blocked_row and blocked_row.get("blocked") is True:
-            return
-    except Exception:
-        logger.exception("Block check failed for sender=%s", sender)
+    # Parallelize database queries: check blocked status + fetch existing conversation
+    async def get_blocked_status():
+        try:
+            blocked_check = (
+                supabase.table("whatsapp_conversations")
+                .select("blocked")
+                .eq("sender", sender)
+                .limit(1)
+                .execute()
+            )
+            blocked_row = first_row(blocked_check)
+            return blocked_row and blocked_row.get("blocked") is True
+        except Exception:
+            logger.exception("Block check failed for sender=%s", sender)
+            return False
 
-    existing = (
-        supabase.table("whatsapp_conversations")
-        .select("id, conversation")
-        .eq("sender", sender)
-        .execute()
-    )
+    async def get_existing_conversation():
+        try:
+            return (
+                supabase.table("whatsapp_conversations")
+                .select("id, conversation")
+                .eq("sender", sender)
+                .execute()
+            )
+        except Exception:
+            logger.exception("Failed to fetch existing conversation for sender=%s", sender)
+            return None
+
+    is_blocked, existing = await asyncio.gather(get_blocked_status(), get_existing_conversation())
+    if is_blocked:
+        return
+
 
     conversation_data: list[dict[str, Any]] = []
     record_id = None
@@ -128,27 +141,20 @@ async def process_message(data: Any) -> None:
         # Use admin client to bypass RLS policies for webhook operations
         db_client = supabase_admin if supabase_admin else supabase
         
-        if record_id:
-            (
-                db_client.table("whatsapp_conversations")
-                .update(
-                    {
-                        "conversation": conversation_data,
-                        "updated_at": datetime.datetime.utcnow().isoformat(),
-                        "unread": True,
-                    }
-                )
-                .eq("id", record_id)
-                .execute()
-            )
-        else:
-            insert_res = (
-                db_client.table("whatsapp_conversations")
-                .insert({"sender": sender, "conversation": conversation_data, "unread": True})
-                .execute()
-            )
-            inserted_row = first_row(insert_res)
-            record_id = inserted_row.get("id") if inserted_row else None
+        # Use UPSERT to avoid race conditions with duplicate key errors
+        upsert_res = (
+            db_client.table("whatsapp_conversations")
+            .upsert({
+                "sender": sender,
+                "client_name": sender,  # Use phone number as default client name
+                "conversation": conversation_data,
+                "updated_at": datetime.datetime.utcnow().isoformat(),
+                "unread": True,
+            })
+            .execute()
+        )
+        upserted_row = first_row(upsert_res)
+        record_id = upserted_row.get("id") if upserted_row else None
     except Exception:
         logger.exception("Failed to persist incoming user message for sender=%s", sender)
 
