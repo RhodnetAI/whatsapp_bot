@@ -82,7 +82,9 @@ def _is_missing_table_error(exc: Exception) -> bool:
     if not isinstance(exc, APIError):
         return False
     payload = exc.args[0] if exc.args and isinstance(exc.args[0], dict) else {}
-    return payload.get("code") == "PGRST205"
+    code = payload.get("code")
+    # PGRST204 = missing column, PGRST205 = missing table
+    return code in ("PGRST204", "PGRST205")
 
 
 def _coerce_int(value: Any) -> int:

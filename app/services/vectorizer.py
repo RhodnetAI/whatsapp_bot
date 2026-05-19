@@ -335,29 +335,20 @@ async def search_vectors(query: str, top_k: int = 4) -> list[dict[str, Any]]:
     if client is not None and qmodels is not None:
         await _ensure_qdrant_collection(client)
         try:
-            # Try FastEmbed API first (query_text parameter)
-            try:
-                search_results = await client.query(
-                    collection_name=QDRANT_COLLECTION,
-                    query_text=query,
-                    limit=top_k,
-                    with_payload=True,
-                )
-            except TypeError:
-                # Fallback to standard AsyncQdrantClient API (query parameter with embedding)
-                search_results = await client.query(
-                    collection_name=QDRANT_COLLECTION,
-                    query=query_embedding,
-                    vector_name=QDRANT_VECTOR_NAME,
-                    limit=top_k,
-                    with_payload=True,
-                )
+            # Use query_points method with explicit embedding vector to avoid FastEmbed dependency
+            search_results = await client.query_points(
+                collection_name=QDRANT_COLLECTION,
+                query=query_embedding,
+                vector_name=QDRANT_VECTOR_NAME,
+                limit=top_k,
+                with_payload=True,
+            )
             return [
                 {
                     **(result.payload or {}),
                     "score": getattr(result, "score", 0.0),
                 }
-                for result in search_results
+                for result in search_results.points
                 if result.payload
             ]
         except Exception as e:
