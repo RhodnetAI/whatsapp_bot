@@ -8,7 +8,7 @@ from fastapi import APIRouter, Request
 from app.core.config import settings
 from app.db.supabase_client import first_row, supabase, supabase_admin
 from app.services.knowledge import answer_query_from_knowledge
-from app.services.whatsapp import send_whatsapp_text
+from app.services.whatsapp import send_whatsapp_text, send_whatsapp_typing_indicator
 
 
 router = APIRouter(tags=["webhook"])
@@ -138,6 +138,7 @@ async def process_message(data: Any) -> None:
         return
 
     sender = message.get("from")
+    message_id = message.get("id")
     text = ""
     text_field = message.get("text")
     if isinstance(text_field, dict):
@@ -148,6 +149,15 @@ async def process_message(data: Any) -> None:
 
     if not sender.startswith("+"):
         sender = f"+{sender}"
+
+    # Send typing indicator to show the user we're processing their message
+    if message_id:
+        try:
+            typing_response = send_whatsapp_typing_indicator(message_id)
+            if typing_response.status_code >= 400:
+                logger.warning("Failed to send typing indicator: %s", typing_response.text)
+        except Exception:
+            logger.exception("Error sending typing indicator for message_id=%s", message_id)
 
     # Parallelize database queries: check blocked status + fetch existing conversation
     db_client = _conversation_client()
