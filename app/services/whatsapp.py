@@ -21,7 +21,7 @@ def send_whatsapp_text(sender: str, message: str) -> requests.Response:
     return requests.post(url, headers=headers, json=payload, timeout=20)
 
 
-def send_whatsapp_typing_indicator(message_id: str) -> requests.Response:
+def send_whatsapp_typing_indicator(sender: str) -> requests.Response:
     """
     Send typing indicator to WhatsApp to show the user that the service agent is processing.
     The typing indicator automatically dismisses after 25 seconds or when a response is sent.
@@ -32,13 +32,11 @@ def send_whatsapp_typing_indicator(message_id: str) -> requests.Response:
         "Authorization": f"Bearer {settings.meta_access_token}",
         "Content-Type": "application/json",
     }
+    wa_id = sender[1:] if sender.startswith("+") else sender
     payload = {
         "messaging_product": "whatsapp",
-        "status": "read",
-        "message_id": message_id,
-        "typing_indicator": {
-            "type": "text"
-        }
+        "to": wa_id,
+        "type": "typing",
     }
     logger.debug("Sending typing indicator with payload: %s", payload)
     response = requests.post(url, headers=headers, json=payload, timeout=20)

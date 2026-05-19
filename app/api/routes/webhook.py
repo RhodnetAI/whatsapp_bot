@@ -9,6 +9,12 @@ from app.core.config import settings
 from app.db.supabase_client import first_row, supabase, supabase_admin
 from app.services.knowledge import answer_query_from_knowledge
 from app.services.whatsapp import send_whatsapp_text, send_whatsapp_typing_indicator
+from app.services.flow_ai import (
+    should_use_flow,
+    process_flow_message,
+    get_flow_state,
+    build_flow_confirmation_details,
+)
 
 
 router = APIRouter(tags=["webhook"])
@@ -44,38 +50,90 @@ async def _generate_response_and_update(
     record_id: str | None,
     conversation_data: list[dict[str, Any]],
 ) -> None:
-    """Background task: generate AI response and update conversation asynchronously."""
+    """Background task: generate AI response (flow or knowledge) and update conversation asynchronously."""
     db_client = _conversation_client()
     
+    # Send typing indicator to show bot is generating response
     try:
-        # Load setup config
-        setup_config: dict[str, str] = {
-            "main_instruction": "",
-            "dos": "",
-            "donts": "",
-        }
+        send_whatsapp_typing_indicator(sender)
+        logger.debug("Sent typing indicator while generating response for sender=%s", sender)
+    except Exception:
+        logger.debug("Failed to send typing indicator during response generation for sender=%s", sender)
+    
+    try:
+        # Load flow builder state
+        flow_builder = None
         try:
-            config_res = (
+            flow_res = (
                 supabase.table("service_agent_setup")
-                .select("main_instruction,dos,donts")
+                .select("flow_builder")
                 .eq("id", 1)
                 .limit(1)
                 .execute()
             )
-            config_row = first_row(config_res) or {}
-            if isinstance(config_row, dict):
-                setup_config = {
-                    "main_instruction": config_row.get("main_instruction") or "",
-                    "dos": config_row.get("dos") or "",
-                    "donts": config_row.get("donts") or "",
-                }
+            flow_row = first_row(flow_res) or {}
+            if isinstance(flow_row, dict):
+                flow_builder = flow_row.get("flow_builder")
         except Exception:
-            logger.exception("Failed to load setup configuration for webhook response")
+            logger.exception("Failed to load flow builder state")
+        
+        ai_reply: str = ""
+        flow_enabled = should_use_flow(flow_builder)
+        
+        if flow_enabled:
+            # Use Flow AI for conversation
+            logger.info("Using Flow AI for sender=%s", sender)
+            flow_state = get_flow_state(conversation_data)
+            ai_reply, updated_flow_state = process_flow_message(text, flow_state, conversation_data, flow_builder)
+        else:
+            # Use Knowledge AI
+            logger.info("Using Knowledge AI for sender=%s", sender)
+            
+            # Load setup config
+            setup_config: dict[str, str] = {
+                "main_instruction": "",
+                "dos": "",
+                "donts": "",
+            }
+            try:
+                config_res = (
+                    supabase.table("service_agent_setup")
+                    .select("main_instruction,dos,donts")
+                    .eq("id", 1)
+                    .limit(1)
+                    .execute()
+                )
+                config_row = first_row(config_res) or {}
+                if isinstance(config_row, dict):
+                    setup_config = {
+                        "main_instruction": config_row.get("main_instruction") or "",
+                        "dos": config_row.get("dos") or "",
+                        "donts": config_row.get("donts") or "",
+                    }
+            except Exception:
+                logger.exception("Failed to load setup configuration for webhook response")
 
-        # Generate AI response
-        ai_reply = await answer_query_from_knowledge(text, setup_config=setup_config)
+            # Generate AI response
+            ai_reply = await answer_query_from_knowledge(text, setup_config=setup_config)
+        
         if conversation_data and isinstance(conversation_data[-1], dict):
             conversation_data[-1]["response"] = ai_reply
+
+        # Save confirmed details when the flow completes
+        if flow_enabled and record_id and isinstance(updated_flow_state, dict) and updated_flow_state.get("completed"):
+            try:
+                confirmation_payload = build_flow_confirmation_details(flow_builder, updated_flow_state)
+                db_client.table("whatsapp_flow_confirmations").upsert(
+                    {
+                        "conversation_id": record_id,
+                        "sender": sender,
+                        "details": confirmation_payload,
+                        "confirmed_at": datetime.datetime.utcnow().isoformat(),
+                    },
+                    on_conflict="conversation_id",
+                ).execute()
+            except Exception:
+                logger.exception("Failed to persist flow confirmation for conversation_id=%s", record_id)
 
         # Update database with response
         if record_id:
@@ -139,19 +197,18 @@ async def process_message(data: Any) -> None:
 
     sender = message.get("from")
     message_id = message.get("id")
-    
-    # Send typing indicator for ANY incoming message (text, media, etc)
-    # This should be done before validating message content
-    if message_id and isinstance(sender, str):
-        logger.info("Sending typing indicator for message_id=%s, sender=%s", message_id, sender)
+
+    logger.debug("Message ID: %s, Sender: %s", message_id, sender)
+
+    # Send typing indicator to show bot is processing
+    if isinstance(sender, str) and sender:
+        logger.info("Sending typing indicator for incoming message from sender=%s", sender)
         try:
-            typing_response = send_whatsapp_typing_indicator(message_id)
-            logger.info("Typing indicator response: status=%s", typing_response.status_code)
-            if typing_response.status_code >= 400:
-                logger.warning("Failed to send typing indicator: %s", typing_response.text)
+            send_whatsapp_typing_indicator(sender)
+            logger.info("Typing indicator sent successfully")
         except Exception:
-            logger.exception("Error sending typing indicator for message_id=%s", message_id)
-    
+            logger.exception("Error sending typing indicator for sender=%s", sender)
+
     # Now extract text for text messages only
     text = ""
     text_field = message.get("text")
@@ -211,7 +268,41 @@ async def process_message(data: Any) -> None:
     # Append incoming query with empty response (will be filled by background task)
     try:
         now_iso = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
-        conversation_data.append({"query": text, "response": "", "time": now_iso})
+
+        # Initialize message entry with flow_state if needed
+        message_entry: dict[str, Any] = {
+            "query": text,
+            "response": "",
+            "time": now_iso,
+        }
+
+        # Check if flow is enabled to initialize flow_state
+        flow_builder = None
+        try:
+            flow_res = (
+                supabase.table("service_agent_setup")
+                .select("flow_builder")
+                .eq("id", 1)
+                .limit(1)
+                .execute()
+            )
+            flow_row = first_row(flow_res) or {}
+            if isinstance(flow_row, dict):
+                flow_builder = flow_row.get("flow_builder")
+        except Exception:
+            logger.exception("Failed to load flow builder state during message append")
+
+        if should_use_flow(flow_builder):
+            # Initialize flow state for new conversations
+            if not conversation_data:
+                message_entry["flow_state"] = {
+                    "started": False,
+                    "current_question_index": 0,
+                    "answers": {},
+                    "completed": False,
+                }
+
+        conversation_data.append(message_entry)
 
         # Use UPSERT to avoid race conditions with duplicate key errors
         upsert_res = (

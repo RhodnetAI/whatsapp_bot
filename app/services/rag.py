@@ -3,7 +3,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Dict, List, Optional, Callable, TypeVar
 
 from openai import OpenAI
 from app.services.ai import generate_ai_reply
@@ -12,7 +12,7 @@ from app.core.config import settings
 
 try:
     from langchain_core.messages import HumanMessage, SystemMessage
-    from langchain_groq import ChatGroq
+    from langchain_groq import ChatGroq  # type: ignore[import]
 except ImportError:  # pragma: no cover
     HumanMessage = None
     SystemMessage = None
@@ -21,10 +21,14 @@ except ImportError:  # pragma: no cover
 try:
     from langsmith import traceable
 except ImportError:  # pragma: no cover
-    def traceable(name: str = "", run_type: str = "") -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+    F = TypeVar("F", bound=Callable[..., Any])
+
+    def _fallback_traceable(*args: Any, **kwargs: Any) -> Callable[[F], F]:
+        def decorator(func: F) -> F:
             return func
         return decorator
+
+    traceable = _fallback_traceable  # type: ignore[assignment]
 
 
 @dataclass
