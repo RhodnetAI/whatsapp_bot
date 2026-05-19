@@ -335,14 +335,23 @@ async def search_vectors(query: str, top_k: int = 4) -> list[dict[str, Any]]:
     if client is not None and qmodels is not None:
         await _ensure_qdrant_collection(client)
         try:
-            # Use query() method which supports named vectors in async client
-            search_results = await client.query(
-                collection_name=QDRANT_COLLECTION,
-                query=query_embedding,
-                vector_name=QDRANT_VECTOR_NAME,
-                limit=top_k,
-                with_payload=True,
-            )
+            # Try FastEmbed API first (query_text parameter)
+            try:
+                search_results = await client.query(
+                    collection_name=QDRANT_COLLECTION,
+                    query_text=query,
+                    limit=top_k,
+                    with_payload=True,
+                )
+            except TypeError:
+                # Fallback to standard AsyncQdrantClient API (query parameter with embedding)
+                search_results = await client.query(
+                    collection_name=QDRANT_COLLECTION,
+                    query=query_embedding,
+                    vector_name=QDRANT_VECTOR_NAME,
+                    limit=top_k,
+                    with_payload=True,
+                )
             return [
                 {
                     **(result.payload or {}),
