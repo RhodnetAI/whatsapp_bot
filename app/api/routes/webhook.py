@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from app.core.config import settings
-from app.db.supabase_client import first_row, supabase
+from app.db.supabase_client import first_row, supabase, supabase_admin
 from app.services.knowledge import answer_query_from_knowledge
 from app.services.whatsapp import send_whatsapp_text
 
@@ -125,9 +125,12 @@ async def process_message(data: Any) -> None:
         now_iso = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
         conversation_data.append({"query": text, "response": "", "time": now_iso})
 
+        # Use admin client to bypass RLS policies for webhook operations
+        db_client = supabase_admin if supabase_admin else supabase
+        
         if record_id:
             (
-                supabase.table("whatsapp_conversations")
+                db_client.table("whatsapp_conversations")
                 .update(
                     {
                         "conversation": conversation_data,
@@ -140,7 +143,7 @@ async def process_message(data: Any) -> None:
             )
         else:
             insert_res = (
-                supabase.table("whatsapp_conversations")
+                db_client.table("whatsapp_conversations")
                 .insert({"sender": sender, "conversation": conversation_data, "unread": True})
                 .execute()
             )
