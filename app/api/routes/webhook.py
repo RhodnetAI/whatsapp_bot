@@ -79,10 +79,12 @@ async def process_message(data: Any) -> None:
         sender = f"+{sender}"
 
     # Parallelize database queries: check blocked status + fetch existing conversation
+    db_client = supabase_admin if supabase_admin else supabase
+
     async def get_blocked_status():
         try:
             blocked_check = (
-                supabase.table("whatsapp_conversations")
+                db_client.table("whatsapp_conversations")
                 .select("blocked")
                 .eq("sender", sender)
                 .limit(1)
@@ -97,7 +99,7 @@ async def process_message(data: Any) -> None:
     async def get_existing_conversation():
         try:
             return (
-                supabase.table("whatsapp_conversations")
+                db_client.table("whatsapp_conversations")
                 .select("id, conversation")
                 .eq("sender", sender)
                 .execute()
@@ -138,9 +140,6 @@ async def process_message(data: Any) -> None:
         now_iso = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
         conversation_data.append({"query": text, "response": "", "time": now_iso})
 
-        # Use admin client to bypass RLS policies for webhook operations
-        db_client = supabase_admin if supabase_admin else supabase
-        
         # Use UPSERT to avoid race conditions with duplicate key errors
         upsert_res = (
             db_client.table("whatsapp_conversations")

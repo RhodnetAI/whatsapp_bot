@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from postgrest.exceptions import APIError
 
 from app.core.security import verify_token
-from app.db.supabase_client import first_row, supabase
+from app.db.supabase_client import first_row, supabase, supabase_admin
 from app.models.schemas import (
     RenameClientRequest,
     SenderActionRequest,
@@ -19,6 +19,10 @@ from app.services.whatsapp import send_whatsapp_text
 
 router = APIRouter(tags=["clients"])
 logger = logging.getLogger("whatsapp")
+
+
+def _conversation_client() -> Any:
+    return supabase_admin if supabase_admin is not None else supabase
 
 
 def _load_setup_configuration() -> dict[str, str]:
@@ -37,8 +41,9 @@ async def get_clients(auth: dict[str, Any] = Depends(verify_token)) -> dict[str,
     _ = auth
 
     try:
+        db_client = _conversation_client()
         data = (
-            supabase.table("whatsapp_conversations")
+            db_client.table("whatsapp_conversations")
             .select("sender, client_name, unread, bookmarked, blocked, updated_at")
             .order("updated_at", desc=True)
             .execute()
@@ -84,7 +89,8 @@ async def get_clients(auth: dict[str, Any] = Depends(verify_token)) -> dict[str,
 @router.get("/messages/{sender}")
 async def get_messages(sender: str, auth: dict[str, Any] = Depends(verify_token)) -> dict[str, Any]:
     _ = auth
-    result = supabase.table("whatsapp_conversations").select("*").eq("sender", sender).execute()
+    db_client = _conversation_client()
+    result = db_client.table("whatsapp_conversations").select("*").eq("sender", sender).execute()
     conversation_rows: list[dict[str, Any]] = []
     for row in result.data or []:
         if not isinstance(row, dict):
@@ -103,10 +109,11 @@ async def send_message(
     _ = auth
     sender = body.sender
     message = body.message
+    db_client = _conversation_client()
 
     try:
         blocked_check = (
-            supabase.table("whatsapp_conversations")
+            db_client.table("whatsapp_conversations")
             .select("blocked")
             .eq("sender", sender)
             .limit(1)
@@ -132,7 +139,7 @@ async def send_message(
             meta_text = "send_failed"
 
     existing = (
-        supabase.table("whatsapp_conversations")
+        db_client.table("whatsapp_conversations")
         .select("id, conversation")
         .eq("sender", sender)
         .execute()
@@ -159,14 +166,14 @@ async def send_message(
 
     if record_id:
         (
-            supabase.table("whatsapp_conversations")
+            db_client.table("whatsapp_conversations")
             .update({"conversation": conversation_data, "updated_at": datetime.datetime.utcnow().isoformat()})
             .eq("id", record_id)
             .execute()
         )
     else:
         insert_res = (
-            supabase.table("whatsapp_conversations")
+            db_client.table("whatsapp_conversations")
             .upsert(
                 {"sender": sender, "conversation": conversation_data},
                 on_conflict="sender",
@@ -203,7 +210,8 @@ async def send_message(
 @router.delete("/client/{sender}")
 async def delete_client(sender: str, auth: dict[str, Any] = Depends(verify_token)) -> dict[str, str]:
     _ = auth
-    supabase.table("whatsapp_conversations").delete().eq("sender", sender).execute()
+    db_client = _conversation_client()
+    db_client.table("whatsapp_conversations").delete().eq("sender", sender).execute()
     return {"status": "deleted"}
 
 
@@ -212,7 +220,8 @@ async def rename_client(
     body: RenameClientRequest, auth: dict[str, Any] = Depends(verify_token)
 ) -> dict[str, str]:
     _ = auth
-    supabase.table("whatsapp_conversations").update({"client_name": body.name}).eq("sender", body.sender).execute()
+    db_client = _conversation_client()
+    db_client.table("whatsapp_conversations").update({"client_name": body.name}).eq("sender", body.sender).execute()
     return {"status": "renamed"}
 
 
@@ -221,8 +230,9 @@ async def mark_as_read(
     body: SenderActionRequest, auth: dict[str, Any] = Depends(verify_token)
 ) -> dict[str, str]:
     _ = auth
+    db_client = _conversation_client()
     (
-        supabase.table("whatsapp_conversations")
+        db_client.table("whatsapp_conversations")
         .update({"unread": False})
         .eq("sender", body.sender)
         .execute()
@@ -236,9 +246,10 @@ async def bookmark_client(
 ) -> dict[str, Any]:
     _ = auth
     bookmarked = bool(body.bookmarked) if body.bookmarked is not None else True
+    db_client = _conversation_client()
     try:
         (
-            supabase.table("whatsapp_conversations")
+            db_client.table("whatsapp_conversations")
             .update({"bookmarked": bookmarked})
             .eq("sender", body.sender)
             .execute()
@@ -255,9 +266,10 @@ async def block_client(
 ) -> dict[str, Any]:
     _ = auth
     blocked = bool(body.blocked) if body.blocked is not None else True
+    db_client = _conversation_client()
     try:
         (
-            supabase.table("whatsapp_conversations")
+            db_client.table("whatsapp_conversations")
             .update({"blocked": blocked})
             .eq("sender", body.sender)
             .execute()
