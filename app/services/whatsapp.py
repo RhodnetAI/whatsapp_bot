@@ -36,7 +36,7 @@ def send_whatsapp_typing_indicator(message_id: str) -> requests.Response:
         "messaging_product": "whatsapp",
         "status": "read",
         "message_id": message_id,
-        "typing_indicator": {"type": "text"},
+        "typing_indicator": {"type": "typing"},
     }
     logger.debug("Sending typing indicator with payload: %s", payload)
     response = requests.post(url, headers=headers, json=payload, timeout=20)
