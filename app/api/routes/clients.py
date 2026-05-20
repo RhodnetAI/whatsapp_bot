@@ -89,6 +89,62 @@ async def get_clients(auth: dict[str, Any] = Depends(verify_token)) -> dict[str,
     return {"clients": clients}
 
 
+@router.get("/flow-data")
+async def get_flow_data(auth: dict[str, Any] = Depends(verify_token)) -> dict[str, list[dict[str, Any]]]:
+    _ = auth
+
+    db_client = _conversation_client()
+
+    confirmations_res = (
+        db_client.table("whatsapp_flow_confirmations")
+        .select("conversation_id, sender, details, confirmed_at, updated_at")
+        .order("confirmed_at", desc=True)
+        .execute()
+    )
+
+    conversations_res = (
+        db_client.table("whatsapp_conversations")
+        .select("sender, client_name, lead_label, updated_at")
+        .execute()
+    )
+
+    conversation_map: dict[str, dict[str, Any]] = {}
+    for row in conversations_res.data or []:
+        if not isinstance(row, dict):
+            continue
+        sender = row.get("sender")
+        if isinstance(sender, str):
+            conversation_map[sender] = row
+
+    flow_rows: list[dict[str, Any]] = []
+    for row in confirmations_res.data or []:
+        if not isinstance(row, dict):
+            continue
+
+        sender = row.get("sender")
+        if not isinstance(sender, str):
+            continue
+
+        conversation_row = conversation_map.get(sender, {})
+        details = row.get("details") if isinstance(row.get("details"), dict) else {}
+        questions = details.get("questions") if isinstance(details, dict) and isinstance(details.get("questions"), list) else []
+
+        flow_rows.append(
+            {
+                "conversation_id": row.get("conversation_id"),
+                "sender": sender,
+                "client_name": conversation_row.get("client_name") or sender,
+                "lead_label": conversation_row.get("lead_label") or "general",
+                "confirmed_at": row.get("confirmed_at"),
+                "updated_at": row.get("updated_at") or conversation_row.get("updated_at"),
+                "questions": questions,
+                "details": details,
+            }
+        )
+
+    return {"rows": flow_rows}
+
+
 @router.get("/messages/{sender}")
 async def get_messages(sender: str, auth: dict[str, Any] = Depends(verify_token)) -> dict[str, Any]:
     _ = auth
@@ -143,7 +199,7 @@ async def send_message(
 
     existing = (
         db_client.table("whatsapp_conversations")
-        .select("id, conversation")
+        .select("id, conversation, lead_label")
         .eq("sender", sender)
         .execute()
     )

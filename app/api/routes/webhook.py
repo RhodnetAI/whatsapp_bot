@@ -283,7 +283,7 @@ async def process_message(data: Any) -> None:
         try:
             return (
                 db_client.table("whatsapp_conversations")
-                .select("id, conversation")
+                .select("id, conversation, lead_label")
                 .eq("sender", sender)
                 .execute()
             )
