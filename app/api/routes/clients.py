@@ -14,6 +14,7 @@ from app.models.schemas import (
     ToggleClientRequest,
 )
 from app.services.knowledge import answer_query_from_knowledge
+from app.services.rag import classify_knowledge_lead_label
 from app.services.whatsapp import send_whatsapp_text
 
 
@@ -156,6 +157,9 @@ async def send_message(
         conversation_data = first_existing.get("conversation") or []
         if not isinstance(conversation_data, list):
             conversation_data = []
+        old_lead_label = first_existing.get("lead_label") or "none"
+    else:
+        old_lead_label = "none"
 
     conversation_data.append(
         {
@@ -188,6 +192,12 @@ async def send_message(
     if sender.startswith("fake_"):
         setup_config = _load_setup_configuration()
         ai_reply = await answer_query_from_knowledge(message, setup_config=setup_config)
+        lead_label = await classify_knowledge_lead_label(
+            message,
+            ai_reply,
+            conversation_data,
+            old_label=old_lead_label,
+        )
 
         if conversation_data:
             conversation_data[-1]["response"] = ai_reply
@@ -200,6 +210,7 @@ async def send_message(
                         "conversation": conversation_data,
                         "updated_at": datetime.datetime.utcnow().isoformat(),
                         "unread": True,
+                        "lead_label": lead_label,
                     }
                 )
                 .eq("id", record_id)

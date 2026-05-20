@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -29,6 +30,37 @@ except ImportError:  # pragma: no cover
         return decorator
 
     traceable = _fallback_traceable  # type: ignore[assignment]
+
+
+logger = logging.getLogger("whatsapp")
+
+LEAD_LABEL_NONE = "none"
+LEAD_LABEL_GENERAL = "general"
+LEAD_LABEL_HIGH_INTENT = "high intent"
+LEAD_LABEL_HOT_LEAD = "hot lead"
+
+_LEAD_LABEL_ORDER = {
+    LEAD_LABEL_NONE: 0,
+    LEAD_LABEL_GENERAL: 1,
+    LEAD_LABEL_HIGH_INTENT: 2,
+    LEAD_LABEL_HOT_LEAD: 3,
+}
+
+_LEAD_LABEL_CLASSIFICATION_PROMPT = (
+    "Classify the customer's intent from the WhatsApp conversation.\n"
+    "Respond with JSON only and no extra text.\n\n"
+    "Labels:\n"
+    f"- {LEAD_LABEL_NONE}: no useful signal yet\n"
+    f"- {LEAD_LABEL_GENERAL}: the query is irrelevant, or the assistant says the content is unavailable\n"
+    f"- {LEAD_LABEL_HIGH_INTENT}: the query is relevant to the business, products, or services\n"
+    f"- {LEAD_LABEL_HOT_LEAD}: the query is strongly interested, urgent, or asks about contacting, buying, booking, pricing, or next steps\n\n"
+    "Rules:\n"
+    "- Use the conversation, the assistant reply, and the old label.\n"
+    "- Never downgrade the old label.\n"
+    "- If the assistant reply says there is not enough content or information, use general.\n"
+    "- If the user shows strong buying or contact intent, use hot lead.\n"
+    'Response format: {"label": "<none|general|high intent|hot lead>"}'
+)
 
 
 @dataclass
@@ -83,6 +115,122 @@ def _is_obvious_greeting(message: str) -> bool:
 
 def _sanitize_json(response_text: str) -> str:
     return response_text.strip().split("\n")[-1].strip()
+
+
+def _normalize_lead_label(label: str | None) -> str:
+    if not isinstance(label, str):
+        return LEAD_LABEL_NONE
+
+    normalized = label.strip().lower()
+    if normalized in _LEAD_LABEL_ORDER:
+        return normalized
+    return LEAD_LABEL_NONE
+
+
+def _best_lead_label(*labels: str | None) -> str:
+    best_label = LEAD_LABEL_NONE
+    best_rank = -1
+
+    for label in labels:
+        normalized = _normalize_lead_label(label)
+        rank = _LEAD_LABEL_ORDER[normalized]
+        if rank > best_rank:
+            best_rank = rank
+            best_label = normalized
+
+    return best_label
+
+
+def _render_lead_label_history(
+    chat_history: Optional[List[Dict[str, Any]]] = None,
+    query: str = "",
+    response: str = "",
+    old_label: str | None = None,
+) -> str:
+    lines: List[str] = [f"Old label: {_normalize_lead_label(old_label)}"]
+
+    for turn in (chat_history or [])[-4:]:
+        user_msg = turn.get("query") or ""
+        bot_msg = turn.get("response") or ""
+        lines.append(f"User: {user_msg}")
+        lines.append(f"Assistant: {bot_msg}")
+
+    lines.append(f"Current user: {query}")
+    lines.append(f"Current assistant: {response}")
+    return "\n".join(lines)
+
+
+def _heuristic_lead_label(query: str, response: str) -> str:
+    query_text = f"{query} {response}".lower()
+
+    if "don't have enough information" in query_text or "don't have enough content" in query_text:
+        return LEAD_LABEL_GENERAL
+
+    hot_keywords = [
+        "call me",
+        "contact me",
+        "book a demo",
+        "schedule",
+        "pricing",
+        "price",
+        "quote",
+        "quotation",
+        "buy",
+        "purchase",
+        "ready to",
+        "next steps",
+        "talk to sales",
+        "more details",
+        "more info",
+        "interested",
+    ]
+    if any(keyword in query_text for keyword in hot_keywords):
+        return LEAD_LABEL_HOT_LEAD
+
+    relevant_keywords = [
+        "product",
+        "service",
+        "services",
+        "solution",
+        "solutions",
+        "features",
+        "feature",
+        "integration",
+        "support",
+        "demo",
+        "trial",
+    ]
+    if any(keyword in query_text for keyword in relevant_keywords):
+        return LEAD_LABEL_HIGH_INTENT
+
+    return LEAD_LABEL_GENERAL
+
+
+async def classify_knowledge_lead_label(
+    query: str,
+    response: str,
+    chat_history: Optional[List[Dict[str, Any]]] = None,
+    old_label: str | None = None,
+) -> str:
+    normalized_old_label = _normalize_lead_label(old_label)
+    history_block = _render_lead_label_history(chat_history, query=query, response=response, old_label=normalized_old_label)
+
+    if ChatGroq and settings.groq_api_key.strip() != "":
+        try:
+            groq = ChatGroq(model="llama-3.1-8b-instant", temperature=0, api_key=settings.groq_api_key)
+            if HumanMessage and SystemMessage:
+                result = await groq.ainvoke(
+                    [SystemMessage(content=_LEAD_LABEL_CLASSIFICATION_PROMPT), HumanMessage(content=history_block)]
+                )
+                content = getattr(result, "content", "") or ""
+                payload = _sanitize_json(content)
+                parsed = json.loads(payload)
+                candidate = _normalize_lead_label(parsed.get("label"))
+                return _best_lead_label(normalized_old_label, candidate)
+        except Exception:
+            logger.exception("Groq lead-label classification failed")
+
+    return _best_lead_label(normalized_old_label, _heuristic_lead_label(query, response))
 
 
 async def _classify_and_rewrite_query(user_message: str, chat_history: Optional[List[Dict[str, Any]]] = None) -> QueryIntent:

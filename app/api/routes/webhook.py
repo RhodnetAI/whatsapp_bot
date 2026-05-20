@@ -17,6 +17,7 @@ from app.services.flow_ai import (
     build_flow_confirmation_details,
     get_flow_lead_label,
 )
+from app.services.rag import classify_knowledge_lead_label
 
 
 router = APIRouter(tags=["webhook"])
@@ -51,6 +52,7 @@ async def _generate_response_and_update(
     text: str,
     record_id: str | None,
     conversation_data: list[dict[str, Any]],
+    old_lead_label: str,
 ) -> None:
     """Background task: generate AI response (flow or knowledge) and update conversation asynchronously."""
     db_client = _conversation_client()
@@ -125,16 +127,18 @@ async def _generate_response_and_update(
 
             # Generate AI response
             ai_reply = await answer_query_from_knowledge(text, setup_config=setup_config)
+
+            lead_label = await classify_knowledge_lead_label(
+                text,
+                ai_reply,
+                conversation_data,
+                old_label=old_lead_label,
+            )
+        else:
+            lead_label = get_flow_lead_label(updated_flow_state or flow_state, flow_builder)
         
         if conversation_data and isinstance(conversation_data[-1], dict):
             conversation_data[-1]["response"] = ai_reply
-
-        lead_label = "general"
-        try:
-            lead_label = get_flow_lead_label(updated_flow_state or flow_state, flow_builder)
-        except Exception:
-            logger.exception("Failed to compute lead label for sender=%s", sender)
-            lead_label = "general"
 
         # Save confirmed details when the flow completes
         if flow_enabled and record_id and isinstance(updated_flow_state, dict) and updated_flow_state.get("completed"):
@@ -300,6 +304,9 @@ async def process_message(data: Any) -> None:
         conversation_data = first_existing.get("conversation") or []
         if not isinstance(conversation_data, list):
             conversation_data = []
+        existing_lead_label = first_existing.get("lead_label")
+    else:
+        existing_lead_label = None
 
     # Append incoming query with empty response (will be filled by background task)
     try:
@@ -327,6 +334,10 @@ async def process_message(data: Any) -> None:
                 flow_builder = flow_row.get("flow_builder")
         except Exception:
             logger.exception("Failed to load flow builder state during message append")
+
+        initial_lead_label = existing_lead_label if isinstance(existing_lead_label, str) and existing_lead_label.strip() else None
+        if initial_lead_label is None:
+            initial_lead_label = "general" if should_use_flow(flow_builder) else "none"
 
         if should_use_flow(flow_builder):
             if not conversation_data:
@@ -356,7 +367,7 @@ async def process_message(data: Any) -> None:
                     "conversation": conversation_data,
                     "updated_at": datetime.datetime.utcnow().isoformat(),
                     "unread": True,
-                    "lead_label": "general",
+                    "lead_label": initial_lead_label,
                 },
                 on_conflict="sender",
             )
@@ -370,4 +381,4 @@ async def process_message(data: Any) -> None:
 
     # Spawn background task to generate response and update database
     # This allows the webhook to return immediately (within 3 seconds per WhatsApp spec)
-    asyncio.create_task(_generate_response_and_update(sender, text, record_id, conversation_data))
+    asyncio.create_task(_generate_response_and_update(sender, text, record_id, conversation_data, initial_lead_label))
