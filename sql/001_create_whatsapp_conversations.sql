@@ -11,6 +11,7 @@ create table if not exists public.whatsapp_conversations (
   unread boolean not null default false,
   bookmarked boolean not null default false,
   blocked boolean not null default false,
+  lead_label text not null default 'general',
   conversation_date date not null default current_date,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()

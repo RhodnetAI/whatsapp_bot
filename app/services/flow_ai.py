@@ -12,6 +12,10 @@ DEFAULT_GREETING = "Hi! Before we chat, I'd love to ask you a couple of quick qu
 DEFAULT_COMPLETION = "Thanks! Here's what I've got — confirm to continue."
 DEFAULT_THANK_YOU = "Thanks for sharing that! I'm all set — feel free to ask me anything now."
 
+LEAD_LABEL_GENERAL = "general"
+LEAD_LABEL_HIGH_INTENT = "high intent"
+LEAD_LABEL_HOT_LEAD = "hot lead"
+
 
 def get_flow_state(conversation_data: list[dict[str, Any]]) -> dict[str, Any]:
     """
@@ -181,6 +185,32 @@ def _build_completion_message(text_nodes: list[dict[str, Any]], answers: dict[st
     
     summary_lines.extend(["", "Type *confirm* to proceed."])
     return "\n".join(summary_lines)
+
+
+def get_flow_lead_label(
+    flow_state: dict[str, Any],
+    flow_builder: Optional[dict[str, Any]],
+) -> str:
+    text_nodes = extract_text_nodes(flow_state, flow_builder)
+    total_questions = len(text_nodes)
+    if total_questions == 0:
+        return LEAD_LABEL_GENERAL
+
+    answers = flow_state.get("answers")
+    if not isinstance(answers, dict):
+        return LEAD_LABEL_GENERAL
+
+    completed_answers = sum(
+        1
+        for answer in answers.values()
+        if isinstance(answer, str) and answer.strip() != ""
+    )
+
+    if completed_answers == 0:
+        return LEAD_LABEL_GENERAL
+    if completed_answers >= total_questions:
+        return LEAD_LABEL_HOT_LEAD
+    return LEAD_LABEL_HIGH_INTENT
 
 
 def build_flow_confirmation_details(

@@ -44,7 +44,7 @@ async def get_clients(auth: dict[str, Any] = Depends(verify_token)) -> dict[str,
         db_client = _conversation_client()
         data = (
             db_client.table("whatsapp_conversations")
-            .select("sender, client_name, unread, bookmarked, blocked, updated_at")
+            .select("sender, client_name, unread, bookmarked, blocked, updated_at, conversation_date, lead_label")
             .order("updated_at", desc=True)
             .execute()
         )
@@ -80,6 +80,8 @@ async def get_clients(auth: dict[str, Any] = Depends(verify_token)) -> dict[str,
                 "bookmarked": d.get("bookmarked", False),
                 "blocked": d.get("blocked", False),
                 "updated_at": d.get("updated_at"),
+                "conversation_date": d.get("conversation_date"),
+                "lead_label": d.get("lead_label") or "general",
             }
         )
 

@@ -15,6 +15,7 @@ from app.services.flow_ai import (
     process_flow_message,
     get_flow_state,
     build_flow_confirmation_details,
+    get_flow_lead_label,
 )
 
 
@@ -128,6 +129,13 @@ async def _generate_response_and_update(
         if conversation_data and isinstance(conversation_data[-1], dict):
             conversation_data[-1]["response"] = ai_reply
 
+        lead_label = "general"
+        try:
+            lead_label = get_flow_lead_label(updated_flow_state or flow_state, flow_builder)
+        except Exception:
+            logger.exception("Failed to compute lead label for sender=%s", sender)
+            lead_label = "general"
+
         # Save confirmed details when the flow completes
         if flow_enabled and record_id and isinstance(updated_flow_state, dict) and updated_flow_state.get("completed"):
             try:
@@ -150,6 +158,7 @@ async def _generate_response_and_update(
                 {
                     "conversation": conversation_data,
                     "updated_at": datetime.datetime.utcnow().isoformat(),
+                    "lead_label": lead_label,
                 }
             ).eq("id", record_id).execute()
         else:
@@ -157,6 +166,7 @@ async def _generate_response_and_update(
                 {
                     "conversation": conversation_data,
                     "updated_at": datetime.datetime.utcnow().isoformat(),
+                    "lead_label": lead_label,
                 }
             ).eq("sender", sender).execute()
 
@@ -206,17 +216,34 @@ async def process_message(data: Any) -> None:
 
     sender = message.get("from")
     message_id = message.get("id")
+    message_type = message.get("type")
 
-    logger.debug("Message ID: %s, Sender: %s", message_id, sender)
+    logger.debug(
+        "Message details: sender=%s, message_id=%s, message_type=%s",
+        sender,
+        message_id,
+        message_type,
+    )
 
     # Send typing indicator to show the bot is processing the received message
     if isinstance(sender, str) and sender and isinstance(message_id, str):
-        logger.info("Sending typing indicator for incoming message from sender=%s", sender)
+        logger.info(
+            "Sending typing indicator for incoming message from sender=%s message_id=%s type=%s",
+            sender,
+            message_id,
+            message_type,
+        )
         try:
             send_whatsapp_typing_indicator(message_id)
             logger.info("Typing indicator sent successfully")
         except Exception:
             logger.exception("Error sending typing indicator for sender=%s", sender)
+    else:
+        logger.debug(
+            "Skipping typing indicator because sender or message_id is missing/invalid: sender=%s message_id=%s",
+            sender,
+            message_id,
+        )
 
     # Now extract text for text messages only
     text = ""
@@ -329,6 +356,7 @@ async def process_message(data: Any) -> None:
                     "conversation": conversation_data,
                     "updated_at": datetime.datetime.utcnow().isoformat(),
                     "unread": True,
+                    "lead_label": "general",
                 },
                 on_conflict="sender",
             )
