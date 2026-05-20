@@ -82,8 +82,13 @@ def process_flow_message(
         flow_state["current_question_index"] = 0
         flow_state["answers"] = {}
         flow_state["completed"] = False
-        
         set_flow_state(conversation_data, flow_state)
+
+        # Prompt with the greeting and first question together at flow start
+        text_nodes = extract_text_nodes(flow_state, flow_builder)
+        if text_nodes:
+            return f"{DEFAULT_GREETING}\n\n{_render_question_text(text_nodes[0])}", flow_state
+
         return DEFAULT_GREETING, flow_state
     
     # Get text nodes (questions) from flow
@@ -131,11 +136,8 @@ def process_flow_message(
     # Check if we have more questions
     if current_idx + 1 < len(text_nodes):
         next_node = text_nodes[current_idx + 1]
-        next_question = next_node.get("question", f"Question {current_idx + 2}")
-        
-        # Short acknowledgment + next question
         acknowledgment = f"Got it, thanks for that. "
-        return f"{acknowledgment}\n\n{next_question}", flow_state
+        return f"{acknowledgment}\n\n{_render_question_text(next_node)}", flow_state
     else:
         # All questions answered, show completion
         completion_message = _build_completion_message(
@@ -143,6 +145,23 @@ def process_flow_message(
             flow_state.get("answers", {})
         )
         return completion_message, flow_state
+
+
+def _render_question_text(node: dict[str, Any]) -> str:
+    """Render a single question text, including options if present."""
+    question = node.get("question") or node.get("label") or "Question"
+    raw_options = node.get("options") or node.get("choices")
+    if isinstance(raw_options, list) and raw_options:
+        option_lines: list[str] = []
+        for option in raw_options:
+            if isinstance(option, dict):
+                label = option.get("label") or option.get("value") or str(option)
+            else:
+                label = str(option)
+            option_lines.append(f"- {label}")
+
+        return f"{question}\n{chr(10).join(option_lines)}"
+    return str(question)
 
 
 def _build_completion_message(text_nodes: list[dict[str, Any]], answers: dict[str, str]) -> str:
