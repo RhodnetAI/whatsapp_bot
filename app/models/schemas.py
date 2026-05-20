@@ -16,6 +16,16 @@ class RenameClientRequest(BaseModel):
     name: str
 
 
+class UpdateClientLabelRequest(BaseModel):
+    sender: str
+    lead_label: str
+
+
+class ToggleClientAiRequest(BaseModel):
+    sender: str
+    ai_disabled: bool | None = None
+
+
 class SenderActionRequest(BaseModel):
     sender: str
 

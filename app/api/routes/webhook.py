@@ -249,26 +249,6 @@ async def process_message(data: Any) -> None:
         message_type,
     )
 
-    # Send typing indicator to show the bot is processing the received message
-    if isinstance(sender, str) and sender and isinstance(message_id, str):
-        logger.info(
-            "Sending typing indicator for incoming message from sender=%s message_id=%s type=%s",
-            sender,
-            message_id,
-            message_type,
-        )
-        try:
-            send_whatsapp_typing_indicator(message_id)
-            logger.info("Typing indicator sent successfully")
-        except Exception:
-            logger.exception("Error sending typing indicator for sender=%s", sender)
-    else:
-        logger.debug(
-            "Skipping typing indicator because sender or message_id is missing/invalid: sender=%s message_id=%s",
-            sender,
-            message_id,
-        )
-
     # Now extract text for text messages only
     text = ""
     text_field = message.get("text")
@@ -303,7 +283,7 @@ async def process_message(data: Any) -> None:
         try:
             return (
                 db_client.table("whatsapp_conversations")
-                .select("id, conversation, lead_label")
+                .select("id, conversation, lead_label, ai_disabled")
                 .eq("sender", sender)
                 .execute()
             )
@@ -325,8 +305,10 @@ async def process_message(data: Any) -> None:
         if not isinstance(conversation_data, list):
             conversation_data = []
         existing_lead_label = first_existing.get("lead_label")
+        existing_ai_disabled = bool(first_existing.get("ai_disabled"))
     else:
         existing_lead_label = None
+        existing_ai_disabled = False
 
     # Append incoming query with empty response (will be filled by background task)
     try:
@@ -398,6 +380,30 @@ async def process_message(data: Any) -> None:
     except Exception:
         logger.exception("Failed to persist incoming user message for sender=%s", sender)
         return
+
+    if existing_ai_disabled:
+        logger.info("AI disabled for sender=%s; skipping automated response", sender)
+        return
+
+    # Send typing indicator to show the bot is processing the received message
+    if isinstance(sender, str) and sender and isinstance(message_id, str):
+        logger.info(
+            "Sending typing indicator for incoming message from sender=%s message_id=%s type=%s",
+            sender,
+            message_id,
+            message_type,
+        )
+        try:
+            send_whatsapp_typing_indicator(message_id)
+            logger.info("Typing indicator sent successfully")
+        except Exception:
+            logger.exception("Error sending typing indicator for sender=%s", sender)
+    else:
+        logger.debug(
+            "Skipping typing indicator because sender or message_id is missing/invalid: sender=%s message_id=%s",
+            sender,
+            message_id,
+        )
 
     # Spawn background task to generate response and update database
     # This allows the webhook to return immediately (within 3 seconds per WhatsApp spec)

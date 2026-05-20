@@ -11,7 +11,9 @@ from app.models.schemas import (
     RenameClientRequest,
     SenderActionRequest,
     SendMessageRequest,
+    ToggleClientAiRequest,
     ToggleClientRequest,
+    UpdateClientLabelRequest,
 )
 from app.services.knowledge import answer_query_from_knowledge
 from app.services.rag import classify_knowledge_lead_label
@@ -45,7 +47,7 @@ async def get_clients(auth: dict[str, Any] = Depends(verify_token)) -> dict[str,
         db_client = _conversation_client()
         data = (
             db_client.table("whatsapp_conversations")
-            .select("sender, client_name, unread, bookmarked, blocked, updated_at, conversation_date, lead_label")
+            .select("sender, client_name, unread, bookmarked, blocked, ai_disabled, updated_at, conversation_date, lead_label")
             .order("updated_at", desc=True)
             .execute()
         )
@@ -80,6 +82,7 @@ async def get_clients(auth: dict[str, Any] = Depends(verify_token)) -> dict[str,
                 "unread": d.get("unread", False),
                 "bookmarked": d.get("bookmarked", False),
                 "blocked": d.get("blocked", False),
+                "ai_disabled": bool(d.get("ai_disabled", False)),
                 "updated_at": d.get("updated_at"),
                 "conversation_date": d.get("conversation_date"),
                 "lead_label": "general" if d.get("lead_label") in (None, "", "none") else d.get("lead_label"),
@@ -347,3 +350,51 @@ async def block_client(
     except Exception as exc:
         logger.exception("Block update failed for sender=%s", body.sender)
         raise HTTPException(status_code=500, detail="Failed to update block status") from exc
+
+
+@router.post("/client/label")
+async def label_client(
+    body: UpdateClientLabelRequest, auth: dict[str, Any] = Depends(verify_token)
+) -> dict[str, Any]:
+    _ = auth
+    lead_label = body.lead_label.strip().lower()
+    valid_labels = {"general", "high intent", "hot lead"}
+    if lead_label not in valid_labels:
+        raise HTTPException(status_code=400, detail="Invalid client label")
+
+    db_client = _conversation_client()
+    try:
+        (
+            db_client.table("whatsapp_conversations")
+            .update({"lead_label": lead_label})
+            .eq("sender", body.sender)
+            .execute()
+        )
+        return {"status": "label_updated", "lead_label": lead_label}
+    except Exception as exc:
+        logger.exception("Label update failed for sender=%s", body.sender)
+        raise HTTPException(status_code=500, detail="Failed to update client label") from exc
+
+
+@router.post("/client/ai-toggle")
+async def toggle_client_ai(
+    body: ToggleClientAiRequest, auth: dict[str, Any] = Depends(verify_token)
+) -> dict[str, Any]:
+    _ = auth
+    ai_disabled = bool(body.ai_disabled) if body.ai_disabled is not None else True
+
+    db_client = _conversation_client()
+    try:
+        (
+            db_client.table("whatsapp_conversations")
+            .update({"ai_disabled": ai_disabled})
+            .eq("sender", body.sender)
+            .execute()
+        )
+        return {
+            "status": "ai_disabled" if ai_disabled else "ai_enabled",
+            "ai_disabled": ai_disabled,
+        }
+    except Exception as exc:
+        logger.exception("AI toggle failed for sender=%s", body.sender)
+        raise HTTPException(status_code=500, detail="Failed to update AI status") from exc
