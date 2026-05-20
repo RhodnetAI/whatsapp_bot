@@ -336,8 +336,8 @@ async def process_message(data: Any) -> None:
             logger.exception("Failed to load flow builder state during message append")
 
         initial_lead_label = existing_lead_label if isinstance(existing_lead_label, str) and existing_lead_label.strip() else None
-        if initial_lead_label is None:
-            initial_lead_label = "general" if should_use_flow(flow_builder) else "none"
+        if initial_lead_label is None or initial_lead_label == "none":
+            initial_lead_label = "general"
 
         if should_use_flow(flow_builder):
             if not conversation_data:

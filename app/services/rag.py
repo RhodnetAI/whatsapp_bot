@@ -119,16 +119,18 @@ def _sanitize_json(response_text: str) -> str:
 
 def _normalize_lead_label(label: str | None) -> str:
     if not isinstance(label, str):
-        return LEAD_LABEL_NONE
+        return LEAD_LABEL_GENERAL
 
     normalized = label.strip().lower()
+    if normalized == LEAD_LABEL_NONE:
+        return LEAD_LABEL_GENERAL
     if normalized in _LEAD_LABEL_ORDER:
         return normalized
-    return LEAD_LABEL_NONE
+    return LEAD_LABEL_GENERAL
 
 
 def _best_lead_label(*labels: str | None) -> str:
-    best_label = LEAD_LABEL_NONE
+    best_label = LEAD_LABEL_GENERAL
     best_rank = -1
 
     for label in labels:

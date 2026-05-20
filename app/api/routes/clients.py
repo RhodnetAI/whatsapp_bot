@@ -82,7 +82,7 @@ async def get_clients(auth: dict[str, Any] = Depends(verify_token)) -> dict[str,
                 "blocked": d.get("blocked", False),
                 "updated_at": d.get("updated_at"),
                 "conversation_date": d.get("conversation_date"),
-                "lead_label": d.get("lead_label") or "general",
+                "lead_label": "general" if d.get("lead_label") in (None, "", "none") else d.get("lead_label"),
             }
         )
 
@@ -157,9 +157,9 @@ async def send_message(
         conversation_data = first_existing.get("conversation") or []
         if not isinstance(conversation_data, list):
             conversation_data = []
-        old_lead_label = first_existing.get("lead_label") or "none"
+        old_lead_label = first_existing.get("lead_label") or "general"
     else:
-        old_lead_label = "none"
+        old_lead_label = "general"
 
     conversation_data.append(
         {
