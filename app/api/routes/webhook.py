@@ -79,7 +79,27 @@ async def _generate_response_and_update(
         flow_enabled = should_use_flow(flow_builder)
         flow_state = get_flow_state(conversation_data)
 
-        if flow_enabled and flow_state.get("completed"):
+        # Check if flow completion was already saved in database (handles race conditions)
+        flow_already_completed = False
+        if flow_enabled:
+            try:
+                completion_check = (
+                    db_client.table("whatsapp_flow_confirmations")
+                    .select("id")
+                    .eq("sender", sender)
+                    .limit(1)
+                    .execute()
+                )
+                if first_row(completion_check):
+                    flow_already_completed = True
+                    logger.info(
+                        "Flow completion found in database for sender=%s; switching to Knowledge AI",
+                        sender,
+                    )
+            except Exception:
+                logger.exception("Failed to check flow completion status for sender=%s", sender)
+
+        if flow_enabled and (flow_state.get("completed") or flow_already_completed):
             logger.info(
                 "Flow already completed for sender=%s; switching to Knowledge AI",
                 sender,
