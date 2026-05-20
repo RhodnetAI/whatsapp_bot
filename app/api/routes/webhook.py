@@ -74,13 +74,27 @@ async def _generate_response_and_update(
         ai_reply: str = ""
         updated_flow_state: dict[str, Any] | None = None
         flow_enabled = should_use_flow(flow_builder)
-        
+        flow_state = get_flow_state(conversation_data)
+
+        if flow_enabled and flow_state.get("completed"):
+            logger.info(
+                "Flow already completed for sender=%s; switching to Knowledge AI",
+                sender,
+            )
+            flow_enabled = False
+
         if flow_enabled:
             # Use Flow AI for conversation
             logger.info("Using Flow AI for sender=%s", sender)
-            flow_state = get_flow_state(conversation_data)
             ai_reply, updated_flow_state = process_flow_message(text, flow_state, conversation_data, flow_builder)
-        else:
+            if updated_flow_state and updated_flow_state.get("completed") and ai_reply == "":
+                logger.info(
+                    "Flow completed but flow message returned empty reply for sender=%s; falling back to Knowledge AI",
+                    sender,
+                )
+                flow_enabled = False
+
+        if not flow_enabled:
             # Use Knowledge AI
             logger.info("Using Knowledge AI for sender=%s", sender)
             
