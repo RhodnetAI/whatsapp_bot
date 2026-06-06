@@ -34,3 +34,22 @@ class ToggleClientRequest(BaseModel):
     sender: str
     bookmarked: bool | None = None
     blocked: bool | None = None
+
+
+class BotInstructionsRequest(BaseModel):
+    bot_name: str
+    main_instruction: str
+    dos: str = ""
+    donts: str = ""
+
+
+class BotGreetingRequest(BaseModel):
+    greeting_message: str
+
+
+class BotConfigResponse(BaseModel):
+    bot_name: str
+    main_instruction: str
+    dos: str
+    donts: str
+    greeting_message: str
