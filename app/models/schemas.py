@@ -36,20 +36,42 @@ class ToggleClientRequest(BaseModel):
     blocked: bool | None = None
 
 
-class BotInstructionsRequest(BaseModel):
+class BotIdentityUpdate(BaseModel):
     bot_name: str
-    main_instruction: str
-    dos: str = ""
-    donts: str = ""
+    greeting: str
 
 
-class BotGreetingRequest(BaseModel):
-    greeting_message: str
-
-
-class BotConfigResponse(BaseModel):
-    bot_name: str
+class InstructionsUpdate(BaseModel):
     main_instruction: str
     dos: str
     donts: str
-    greeting_message: str
+
+
+class SocialHandle(BaseModel):
+    platform: str
+    url: str
+
+
+class CompanyInfoUpdate(BaseModel):
+    company_address: str
+    company_phone: str
+    company_email: str
+    social_handles: list[SocialHandle] = []
+
+
+class FlowConfigUpdate(BaseModel):
+    config: dict
+
+
+class SettingsResponse(BaseModel):
+    bot_name: str | None = None
+    greeting: str | None = None
+    main_instruction: str | None = None
+    dos: str | None = None
+    donts: str | None = None
+    company_address: str | None = None
+    company_phone: str | None = None
+    company_email: str | None = None
+    social_handles: list[dict] = []
+    flow_builder: dict | None = None
+    setup_completed: bool = False
