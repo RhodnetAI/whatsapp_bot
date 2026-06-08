@@ -16,12 +16,35 @@ _HISTORY_TABLES = {
 }
 
 # Prompt-assembly building blocks loaded from app_config at runtime — see
-# sql/014_add_bot_prompt_config_entries.sql for their stored values.
+# sql/014_add_bot_prompt_config_entries.sql and
+# sql/015_add_company_info_products_prompt_config_entries.sql for their stored
+# values.
 _PROMPT_CONFIG_KEYS = (
     "answering_guidelines",
     "response_format_rules",
     "history_header",
     "history_footer",
+    "links_references_prompt",
+    "contact_info_prompt",
+    "products_services_prompt",
+)
+
+_PRODUCTS_SERVICES_TABLE = "information_bot_products_services"
+
+# Order/labels mirror the "Available fields" list in the products_services_prompt
+# stored in app_config (sql/015_add_company_info_products_prompt_config_entries.sql).
+_PRODUCT_SERVICE_FIELDS = (
+    ("name", "Name"),
+    ("short_description", "Short Description"),
+    ("category", "Category"),
+    ("full_description", "Full Description"),
+    ("price", "Price"),
+    ("discount_price", "Discount Price"),
+    ("status", "Status"),
+    ("images", "Images"),
+    ("rating", "Rating"),
+    ("reviews_count", "Reviews Count"),
+    ("purchased_count", "Purchased Count"),
 )
 
 
@@ -61,7 +84,11 @@ async def get_active_bot() -> dict[str, Any]:
     info_row = first_row(
         _db()
         .table("information_bot")
-        .select("is_selected, bot_name, greeting, summarized_instruction")
+        .select(
+            "is_selected, bot_name, greeting, summarized_instruction, "
+            "company_info_enabled, company_address, company_phone, company_email, social_handles, "
+            "products_services_enabled"
+        )
         .eq("id", SINGLETON_ID)
         .limit(1)
         .execute()
@@ -85,12 +112,23 @@ async def get_active_bot() -> dict[str, Any]:
             or {}
         )
 
+    social_handles = row.get("social_handles") if bot_table == "information_bot" else None
+
     return {
         "bot_table": bot_table,
         "history_table": _HISTORY_TABLES[bot_table],
         "bot_name": row.get("bot_name") or "",
         "greeting": row.get("greeting") or "",
         "summarized_instruction": row.get("summarized_instruction") or "",
+        # Information Agent only — used to conditionally inject the Company
+        # Info / Products & Services sections into the prompt (see
+        # _build_company_info_section / _build_products_services_section).
+        "company_info_enabled": bot_table == "information_bot" and bool(row.get("company_info_enabled")),
+        "products_services_enabled": bot_table == "information_bot" and bool(row.get("products_services_enabled")),
+        "company_address": row.get("company_address") or "" if bot_table == "information_bot" else "",
+        "company_phone": row.get("company_phone") or "" if bot_table == "information_bot" else "",
+        "company_email": row.get("company_email") or "" if bot_table == "information_bot" else "",
+        "social_handles": social_handles if isinstance(social_handles, list) else [],
     }
 
 
@@ -142,11 +180,85 @@ async def fetch_recent_turns(
         return []
 
 
+def _build_company_info_section(bot: dict[str, Any], prompt_config: dict[str, str]) -> str:
+    """Build the Company Info system-prompt section (Contact Details +
+    Links/References) from the active bot's own row, framed by the
+    contact_info_prompt / links_references_prompt loaded from app_config."""
+    blocks: list[str] = []
+
+    contact_prompt = prompt_config.get("contact_info_prompt", "").strip()
+    if contact_prompt:
+        contact_lines = []
+        if bot.get("company_phone"):
+            contact_lines.append(f"Phone: {bot['company_phone']}")
+        if bot.get("company_email"):
+            contact_lines.append(f"Email: {bot['company_email']}")
+        if bot.get("company_address"):
+            contact_lines.append(f"Address: {bot['company_address']}")
+        block = contact_prompt
+        if contact_lines:
+            block += "\n" + "\n".join(contact_lines)
+        blocks.append(block)
+
+    links_prompt = prompt_config.get("links_references_prompt", "").strip()
+    if links_prompt:
+        link_lines = [
+            f"{handle.get('platform')}: {handle.get('url')}"
+            for handle in bot.get("social_handles") or []
+            if isinstance(handle, dict) and handle.get("platform") and handle.get("url")
+        ]
+        block = links_prompt
+        if link_lines:
+            block += "\n" + "\n".join(link_lines)
+        blocks.append(block)
+
+    return "\n\n".join(blocks)
+
+
+async def _fetch_products_services_rows() -> list[dict[str, Any]]:
+    """Fetch every product/service row for injection into the Information
+    Agent's prompt (gated on products_services_enabled by the caller)."""
+    try:
+        result = (
+            _db()
+            .table(_PRODUCTS_SERVICES_TABLE)
+            .select(", ".join(field for field, _ in _PRODUCT_SERVICE_FIELDS))
+            .execute()
+        )
+        return [row for row in (result.data or []) if isinstance(row, dict)]
+    except Exception:
+        logger.exception("Failed to fetch products/services for prompt injection")
+        return []
+
+
+def _format_product_service_item(row: dict[str, Any]) -> str:
+    lines = [
+        f"{label}: {row[field]}"
+        for field, label in _PRODUCT_SERVICE_FIELDS
+        if row.get(field) not in (None, "")
+    ]
+    return "\n".join(lines)
+
+
+def _build_products_services_section(prompt_config: dict[str, str], rows: list[dict[str, Any]]) -> str:
+    """Build the Products & Services system-prompt section from the fetched
+    rows, framed by the products_services_prompt loaded from app_config."""
+    prompt = prompt_config.get("products_services_prompt", "").strip()
+    if not prompt:
+        return ""
+
+    items = [item for item in (_format_product_service_item(row) for row in rows) if item]
+    if not items:
+        return prompt
+    return prompt + "\n\n" + "\n\n".join(items)
+
+
 def build_messages(
     summarized_instruction: str,
     prompt_config: dict[str, str],
     history: list[dict[str, str]],
     user_message: str,
+    extra_sections: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Assemble the messages array the same way inteliz's basic bot does
     (system message, replayed history, current user message — as a plain
@@ -160,6 +272,7 @@ def build_messages(
             summarized_instruction.strip(),
             prompt_config.get("answering_guidelines", "").strip(),
             prompt_config.get("response_format_rules", "").strip(),
+            *(extra_sections or []),
         )
         if section
     ]
@@ -194,7 +307,23 @@ async def generate_bot_reply(phone_number: str, user_message: str) -> tuple[str,
     history = await fetch_recent_turns(history_table, phone_number)
     prompt_config = await _fetch_prompt_config()
     summarized_instruction = bot["summarized_instruction"] or f"You are {bot['bot_name'] or 'a helpful assistant'}."
-    messages = build_messages(summarized_instruction, prompt_config, history, user_message)
+
+    # Information Agent only: inject the Company Info (Contact Details +
+    # Links/References) and Products & Services sections, each gated strictly
+    # on its own enabled toggle from the active information_bot row.
+    extra_sections: list[str] = []
+    if bot["bot_table"] == "information_bot":
+        if bot["company_info_enabled"]:
+            section = _build_company_info_section(bot, prompt_config)
+            if section:
+                extra_sections.append(section)
+        if bot["products_services_enabled"]:
+            rows = await _fetch_products_services_rows()
+            section = _build_products_services_section(prompt_config, rows)
+            if section:
+                extra_sections.append(section)
+
+    messages = build_messages(summarized_instruction, prompt_config, history, user_message, extra_sections)
     reply = await generate_ai_reply(messages)
     return reply, bot
 
