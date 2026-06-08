@@ -10,11 +10,6 @@ logger = logging.getLogger("whatsapp")
 SINGLETON_ID = 1
 MAX_HISTORY_TURNS = 5
 
-_HISTORY_TABLES = {
-    "information_bot": "information_bot_conversations",
-    "sales_bot": "sales_bot_conversations",
-}
-
 # Prompt-assembly building blocks loaded from app_config at runtime — see
 # sql/014_add_bot_prompt_config_entries.sql and
 # sql/015_add_company_info_products_prompt_config_entries.sql for their stored
@@ -52,10 +47,6 @@ def _db():
     return supabase_admin if supabase_admin is not None else supabase
 
 
-def _today() -> str:
-    return datetime.datetime.utcnow().date().isoformat()
-
-
 async def _fetch_prompt_config() -> dict[str, str]:
     """Fetch the prompt-assembly building blocks from app_config by key."""
     values = {key: "" for key in _PROMPT_CONFIG_KEYS}
@@ -80,7 +71,7 @@ async def _fetch_prompt_config() -> dict[str, str]:
 
 async def get_active_bot() -> dict[str, Any]:
     """Identify the active bot (information_bot or sales_bot) via is_selected
-    and return its identity/instruction fields plus its history table name."""
+    and return its identity/instruction fields."""
     info_row = first_row(
         _db()
         .table("information_bot")
@@ -116,7 +107,6 @@ async def get_active_bot() -> dict[str, Any]:
 
     return {
         "bot_table": bot_table,
-        "history_table": _HISTORY_TABLES[bot_table],
         "bot_name": row.get("bot_name") or "",
         "greeting": row.get("greeting") or "",
         "summarized_instruction": row.get("summarized_instruction") or "",
@@ -132,52 +122,72 @@ async def get_active_bot() -> dict[str, Any]:
     }
 
 
-async def is_first_message_of_session(history_table: str, phone_number: str) -> bool:
-    """A session is one calendar day per phone number: the session has just
-    started if no message exists yet for this phone number on today's date."""
+def _entry_time(entry: dict[str, Any]) -> datetime.datetime | None:
+    """Parse a `conversation` JSON entry's ISO `time` field into a datetime,
+    or None if it is missing/unparseable."""
+    time_value = entry.get("time")
+    if not isinstance(time_value, str):
+        return None
     try:
-        result = (
-            _db()
-            .table(history_table)
-            .select("id")
-            .eq("phone_number", phone_number)
-            .eq("session_date", _today())
-            .limit(1)
-            .execute()
-        )
-        return first_row(result) is None
-    except Exception:
-        logger.exception(
-            "Failed to check session start for phone=%s table=%s", phone_number, history_table
-        )
-        return False
+        return datetime.datetime.fromisoformat(time_value)
+    except ValueError:
+        return None
 
 
-async def fetch_recent_turns(
-    history_table: str, phone_number: str, turns: int = MAX_HISTORY_TURNS
+def is_first_message_of_session(prior_entries: list[dict[str, Any]]) -> bool:
+    """A session is one calendar day: the session has just started if none of
+    this conversation's prior entries (the JSON array minus the just-appended
+    current message) were sent earlier today (UTC), per whatsapp_conversations
+    — the same day-based definition used previously, now derived from the
+    conversation JSON instead of a separate history table."""
+    today = datetime.datetime.utcnow().date()
+    for entry in prior_entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_time = _entry_time(entry)
+        if entry_time is not None and entry_time.date() == today:
+            return False
+    return True
+
+
+def _entry_to_messages(entry: dict[str, Any]) -> list[dict[str, str]]:
+    """Convert one `conversation` JSON entry into zero or more {"role",
+    "content"} messages, oldest first.
+
+    Normal entries store the inbound user message in `query` and the
+    generated reply in `response`. Manual dashboard messages (clients.py
+    send_message) are recorded the same way but flagged `manual: True`, with
+    the admin's outgoing text in `query` and an empty `response` — i.e. they
+    speak AS the assistant, so they surface to the model as assistant turns."""
+    query = entry.get("query")
+    response = entry.get("response")
+    messages: list[dict[str, str]] = []
+
+    if entry.get("manual"):
+        if isinstance(query, str) and query.strip():
+            messages.append({"role": "assistant", "content": query})
+    else:
+        if isinstance(query, str) and query.strip():
+            messages.append({"role": "user", "content": query})
+        if isinstance(response, str) and response.strip():
+            messages.append({"role": "assistant", "content": response})
+
+    return messages
+
+
+def fetch_recent_turns(
+    prior_entries: list[dict[str, Any]], turns: int = MAX_HISTORY_TURNS
 ) -> list[dict[str, str]]:
-    """Fetch the last `turns` user/assistant turns (up to turns*2 messages)
-    from today's session, oldest first, as {"role", "content"} dicts ready
-    to be placed directly into the messages array sent to the model."""
-    try:
-        result = (
-            _db()
-            .table(history_table)
-            .select("role, message, created_at")
-            .eq("phone_number", phone_number)
-            .eq("session_date", _today())
-            .order("created_at", desc=True)
-            .limit(turns * 2)
-            .execute()
-        )
-        rows = list(result.data or [])
-        rows.reverse()
-        return [{"role": row.get("role"), "content": row.get("message") or ""} for row in rows]
-    except Exception:
-        logger.exception(
-            "Failed to fetch conversation history for phone=%s table=%s", phone_number, history_table
-        )
-        return []
+    """Build the last `turns` user/assistant turns (up to turns*2 messages),
+    oldest first, as {"role", "content"} dicts ready to be placed directly
+    into the messages array sent to the model — derived straight from
+    whatsapp_conversations.conversation, which already holds both AI-handled
+    user messages and manually-sent admin messages."""
+    messages: list[dict[str, str]] = []
+    for entry in prior_entries:
+        if isinstance(entry, dict):
+            messages.extend(_entry_to_messages(entry))
+    return messages[-(turns * 2):]
 
 
 def _build_company_info_section(bot: dict[str, Any], prompt_config: dict[str, str]) -> str:
@@ -291,20 +301,29 @@ def build_messages(
     return messages
 
 
-async def generate_bot_reply(phone_number: str, user_message: str) -> tuple[str, dict[str, Any]]:
-    """Generate the reply for an incoming message from the active bot.
+async def generate_bot_reply(
+    user_message: str, conversation_data: list[dict[str, Any]]
+) -> tuple[str, dict[str, Any]]:
+    """Generate the reply for an incoming message from the active bot, using
+    whatsapp_conversations.conversation as the sole source of session/greeting
+    detection and conversational memory (no separate history tables).
 
-    Returns (reply_text, bot) where `bot` is the active-bot info dict
-    (including history_table) so the caller can persist the turn afterwards.
+    `conversation_data` is the sender's full conversation JSON array,
+    including the just-appended current message as its last entry — so all
+    prior entries (everything but the last) form the session/history context,
+    and already include both AI-handled user turns and manually-sent admin
+    messages (clients.py records those into the same array).
+
+    Returns (reply_text, bot) where `bot` is the active-bot info dict.
     """
     bot = await get_active_bot()
-    history_table = bot["history_table"]
+    prior_entries = conversation_data[:-1] if conversation_data else []
 
-    if await is_first_message_of_session(history_table, phone_number):
+    if is_first_message_of_session(prior_entries):
         reply = bot["greeting"] or f"Hello! I'm {bot['bot_name'] or 'your assistant'}."
         return reply, bot
 
-    history = await fetch_recent_turns(history_table, phone_number)
+    history = fetch_recent_turns(prior_entries)
     prompt_config = await _fetch_prompt_config()
     summarized_instruction = bot["summarized_instruction"] or f"You are {bot['bot_name'] or 'a helpful assistant'}."
 
@@ -326,53 +345,3 @@ async def generate_bot_reply(phone_number: str, user_message: str) -> tuple[str,
     messages = build_messages(summarized_instruction, prompt_config, history, user_message, extra_sections)
     reply = await generate_ai_reply(messages)
     return reply, bot
-
-
-async def record_turn(history_table: str, phone_number: str, user_message: str, bot_message: str) -> None:
-    """Persist a completed user/assistant turn into the bot's own history table."""
-    try:
-        today = _today()
-        user_time = datetime.datetime.utcnow()
-        bot_time = user_time + datetime.timedelta(milliseconds=1)
-        _db().table(history_table).insert(
-            [
-                {
-                    "phone_number": phone_number,
-                    "role": "user",
-                    "message": user_message,
-                    "session_date": today,
-                    "created_at": user_time.isoformat(),
-                },
-                {
-                    "phone_number": phone_number,
-                    "role": "assistant",
-                    "message": bot_message,
-                    "session_date": today,
-                    "created_at": bot_time.isoformat(),
-                },
-            ]
-        ).execute()
-    except Exception:
-        logger.exception(
-            "Failed to store conversation turn for phone=%s table=%s", phone_number, history_table
-        )
-
-
-async def record_assistant_message(history_table: str, phone_number: str, message: str) -> None:
-    """Persist an outgoing message that did not come from the AI (e.g. an
-    admin message sent manually from the dashboard) so it is part of the
-    history the AI sees for subsequent replies."""
-    try:
-        _db().table(history_table).insert(
-            {
-                "phone_number": phone_number,
-                "role": "assistant",
-                "message": message,
-                "session_date": _today(),
-                "created_at": datetime.datetime.utcnow().isoformat(),
-            }
-        ).execute()
-    except Exception:
-        logger.exception(
-            "Failed to store manual message for phone=%s table=%s", phone_number, history_table
-        )

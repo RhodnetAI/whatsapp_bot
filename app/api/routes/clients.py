@@ -15,7 +15,6 @@ from app.models.schemas import (
     ToggleClientRequest,
     UpdateClientLabelRequest,
 )
-from app.services.bot_chat import get_active_bot, record_assistant_message
 from app.services.knowledge import answer_query_from_knowledge
 from app.services.rag import classify_knowledge_lead_label
 from app.services.whatsapp import send_whatsapp_text
@@ -254,16 +253,6 @@ async def send_message(
         )
         inserted_row = first_row(insert_res)
         record_id = inserted_row.get("id") if inserted_row else None
-
-    if not sender.startswith("fake_"):
-        # Manual messages sent by an admin from the dashboard are outgoing
-        # messages to the customer — record them as "assistant" turns in the
-        # active bot's own conversation history so the AI sees them as context.
-        try:
-            active_bot = await get_active_bot()
-            await record_assistant_message(active_bot["history_table"], sender, message)
-        except Exception:
-            logger.exception("Failed to record manual message in bot history for sender=%s", sender)
 
     if sender.startswith("fake_"):
         setup_config = _load_setup_configuration()

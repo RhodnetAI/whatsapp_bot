@@ -8,7 +8,7 @@ from fastapi import APIRouter, Request
 
 from app.core.config import settings
 from app.db.supabase_client import first_row, supabase, supabase_admin
-from app.services.bot_chat import generate_bot_reply, record_turn
+from app.services.bot_chat import generate_bot_reply
 from app.services.whatsapp import send_whatsapp_text, send_whatsapp_typing_indicator
 from app.services.flow_ai import (
     should_use_flow,
@@ -120,11 +120,15 @@ async def _generate_response_and_update(
         if not flow_enabled:
             # Use the active bot (Information Agent or Sales Agent): greeting on
             # the first message of the day's session, otherwise summarized
-            # instructions + last 5 turns of that bot's own conversation history.
+            # instructions + the last 5 turns of conversational memory — both
+            # derived directly from whatsapp_conversations.conversation (the
+            # single source of truth; conversation_data already includes the
+            # just-appended current message as its last entry, and the reply
+            # is persisted back into the same row below, so no separate
+            # history table read/write is needed).
             logger.info("Using bot conversation AI for sender=%s", sender)
 
-            ai_reply, active_bot = await generate_bot_reply(sender, text)
-            await record_turn(active_bot["history_table"], sender, text, ai_reply)
+            ai_reply, _ = await generate_bot_reply(text, conversation_data)
 
             lead_label = await classify_knowledge_lead_label(
                 text,
