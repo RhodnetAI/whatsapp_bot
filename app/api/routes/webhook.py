@@ -8,7 +8,7 @@ from fastapi import APIRouter, Request
 
 from app.core.config import settings
 from app.db.supabase_client import first_row, supabase, supabase_admin
-from app.services.knowledge import answer_query_from_knowledge
+from app.services.bot_chat import generate_bot_reply, record_turn
 from app.services.whatsapp import send_whatsapp_text, send_whatsapp_typing_indicator
 from app.services.flow_ai import (
     should_use_flow,
@@ -118,35 +118,13 @@ async def _generate_response_and_update(
                 flow_enabled = False
 
         if not flow_enabled:
-            # Use Knowledge AI
-            logger.info("Using Knowledge AI for sender=%s", sender)
-            
-            # Load setup config
-            setup_config: dict[str, str] = {
-                "main_instruction": "",
-                "dos": "",
-                "donts": "",
-            }
-            try:
-                config_res = (
-                    supabase.table("service_agent_setup")
-                    .select("main_instruction,dos,donts")
-                    .eq("id", 1)
-                    .limit(1)
-                    .execute()
-                )
-                config_row = first_row(config_res) or {}
-                if isinstance(config_row, dict):
-                    setup_config = {
-                        "main_instruction": config_row.get("main_instruction") or "",
-                        "dos": config_row.get("dos") or "",
-                        "donts": config_row.get("donts") or "",
-                    }
-            except Exception:
-                logger.exception("Failed to load setup configuration for webhook response")
+            # Use the active bot (Information Agent or Sales Agent): greeting on
+            # the first message of the day's session, otherwise summarized
+            # instructions + last 5 turns of that bot's own conversation history.
+            logger.info("Using bot conversation AI for sender=%s", sender)
 
-            # Generate AI response
-            ai_reply = await answer_query_from_knowledge(text, setup_config=setup_config)
+            ai_reply, active_bot = await generate_bot_reply(sender, text)
+            await record_turn(active_bot["history_table"], sender, text, ai_reply)
 
             lead_label = await classify_knowledge_lead_label(
                 text,

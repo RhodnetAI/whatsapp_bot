@@ -15,6 +15,7 @@ from app.models.schemas import (
     ToggleClientRequest,
     UpdateClientLabelRequest,
 )
+from app.services.bot_chat import get_active_bot, record_assistant_message
 from app.services.knowledge import answer_query_from_knowledge
 from app.services.rag import classify_knowledge_lead_label
 from app.services.whatsapp import send_whatsapp_text
@@ -29,13 +30,19 @@ def _conversation_client() -> Any:
 
 
 def _load_setup_configuration() -> dict[str, str]:
-    setup_row = first_row(
-        supabase.table("service_agent_setup").select("*").eq("id", 1).limit(1).execute()
+    info_row = first_row(
+        supabase.table("information_bot").select("is_selected, main_instruction, dos, donts").eq("id", 1).limit(1).execute()
     )
+    if info_row and info_row.get("is_selected"):
+        row = info_row
+    else:
+        row = first_row(
+            supabase.table("sales_bot").select("main_instruction, dos, donts").eq("id", 1).limit(1).execute()
+        )
     return {
-        "main_instruction": str(setup_row.get("main_instruction") or "") if setup_row else "",
-        "dos": str(setup_row.get("dos") or "") if setup_row else "",
-        "donts": str(setup_row.get("donts") or "") if setup_row else "",
+        "main_instruction": str(row.get("main_instruction") or "") if row else "",
+        "dos": str(row.get("dos") or "") if row else "",
+        "donts": str(row.get("donts") or "") if row else "",
     }
 
 
@@ -247,6 +254,16 @@ async def send_message(
         )
         inserted_row = first_row(insert_res)
         record_id = inserted_row.get("id") if inserted_row else None
+
+    if not sender.startswith("fake_"):
+        # Manual messages sent by an admin from the dashboard are outgoing
+        # messages to the customer — record them as "assistant" turns in the
+        # active bot's own conversation history so the AI sees them as context.
+        try:
+            active_bot = await get_active_bot()
+            await record_assistant_message(active_bot["history_table"], sender, message)
+        except Exception:
+            logger.exception("Failed to record manual message in bot history for sender=%s", sender)
 
     if sender.startswith("fake_"):
         setup_config = _load_setup_configuration()

@@ -45,13 +45,14 @@ Create `.env` in this folder and define:
 This backend expects the following tables:
 
 - `public.whatsapp_conversations`
-- `public.service_agent_setup`
-- `public.service_agent_documents`
+- `public.information_bot`
+- `public.sales_bot`
 
 1. Open your Supabase project dashboard.
 2. Go to SQL Editor.
 3. Run [sql/001_create_whatsapp_conversations.sql](sql/001_create_whatsapp_conversations.sql).
-4. Run [sql/002_service_agent_setup.sql](sql/002_service_agent_setup.sql).
+4. Run [sql/007_create_bot_tables.sql](sql/007_create_bot_tables.sql).
+5. Run [sql/009_add_knowledge_to_information_bot.sql](sql/009_add_knowledge_to_information_bot.sql) (adds the Knowledge toggle/document columns to `information_bot` and creates the document storage bucket).
 
 If these tables are missing, the onboarding and dashboard routes will fail or fall back to preview mode.
 
