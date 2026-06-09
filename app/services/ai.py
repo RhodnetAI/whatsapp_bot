@@ -1,5 +1,4 @@
 import asyncio
-from typing import Any, cast
 
 from openai import OpenAI
 
@@ -12,12 +11,15 @@ async def generate_ai_reply(messages_for_ai: list[dict[str, str]]) -> str:
 
     try:
         client = OpenAI(api_key=settings.openai_api_key)
+        input_messages = [
+            {"role": "developer" if m["role"] == "system" else m["role"], "content": m["content"]}
+            for m in messages_for_ai
+        ]
         response = await asyncio.to_thread(
-            client.chat.completions.create,
+            client.responses.create,
             model="gpt-4o-mini",
-            messages=cast(Any, messages_for_ai),
+            input=input_messages,
         )
-        ai_content = getattr(response.choices[0].message, "content", "")
-        return ai_content.strip() if isinstance(ai_content, str) else ""
+        return (response.output_text or "").strip()
     except Exception:
         return "I'm sorry, I'm having trouble responding right now. Please try again later."

@@ -80,15 +80,13 @@ async def generate_summarized_instruction(raw_text: str) -> str:
     try:
         client = OpenAI(api_key=settings.openai_api_key)
         response = await asyncio.to_thread(
-            client.chat.completions.create,
+            client.responses.create,
             model="gpt-4o-mini",
             temperature=0.2,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": raw_text},
-            ],
+            instructions=system_prompt,
+            input=raw_text,
         )
-        content = getattr(response.choices[0].message, "content", "")
+        content = response.output_text
         return content.strip() if isinstance(content, str) else raw_text
     except Exception:
         return raw_text

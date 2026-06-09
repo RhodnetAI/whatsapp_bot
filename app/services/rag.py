@@ -273,14 +273,12 @@ async def _classify_and_rewrite_query(user_message: str, chat_history: Optional[
 
     client = OpenAI(api_key=settings.openai_api_key)
     response = await asyncio.to_thread(
-        client.chat.completions.create,
+        client.responses.create,
         model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": _INTENT_COMBINED_SYSTEM_PROMPT},
-            {"role": "user", "content": human_content},
-        ],
+        instructions=_INTENT_COMBINED_SYSTEM_PROMPT,
+        input=human_content,
     )
-    content = getattr(response.choices[0].message, "content", "") or ""
+    content = response.output_text or ""
     payload = _sanitize_json(content)
     try:
         parsed = json.loads(payload)
