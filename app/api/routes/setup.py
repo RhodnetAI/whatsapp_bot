@@ -223,6 +223,21 @@ async def update_section(
             status_code=400,
             detail=f"Section '{payload.section}' not valid for active bot.",
         )
+
+    # Scheduler and Flow Creation are mutually exclusive on information_bot
+    if table == "information_bot" and payload.enabled:
+        row = _get_row(table)
+        if payload.section == "scheduler" and row.get("flow_creation_enabled"):
+            raise HTTPException(
+                status_code=409,
+                detail="Please disable Flow Creation before enabling the Scheduler.",
+            )
+        if payload.section == "flow_creation" and row.get("scheduler_enabled"):
+            raise HTTPException(
+                status_code=409,
+                detail="Please disable the Scheduler before enabling Flow Creation.",
+            )
+
     _db().table(table).update({col: payload.enabled}).eq("id", SINGLETON_ID).execute()
     return {"ok": True}
 

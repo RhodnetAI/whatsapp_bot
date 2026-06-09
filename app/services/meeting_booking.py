@@ -281,37 +281,11 @@ def _build_verification_message(partial: dict[str, Any]) -> str:
         f"⏰ Time:  {slot_start} – {slot_end}\n"
         f"👤 Name:  {user_name}\n"
         f"📧 Email: {user_email}\n\n"
-        "Are all details correct? Reply *confirm* to book, or tell me what you'd like to change."
+        "Please reply *Confirm* to proceed."
         f"{_NO_FOOTER}"
     )
     return msg
 
-
-def _apply_correction(partial: dict[str, Any], user_message: str) -> tuple[dict[str, Any], str]:
-    """Try to detect what the user wants to change and apply it.
-    Returns (updated_partial, clarification_or_empty)."""
-    text = user_message.strip()
-    # Email correction
-    if _is_valid_email(text):
-        partial["user_email"] = text
-        return partial, ""
-    # Name correction heuristic: short text with no @ and no digits
-    if len(text) < 60 and "@" not in text and not any(c.isdigit() for c in text):
-        lower = text.lower()
-        # If message says "name is X" or "my name is X", extract X
-        name_match = re.search(r"(?:name\s+is|name:)\s*(.+)", lower)
-        if name_match:
-            partial["user_name"] = name_match.group(1).strip().title()
-            return partial, ""
-        # Otherwise treat the whole message as a name replacement if it looks like one
-        if 2 <= len(text.split()) <= 4:
-            partial["user_name"] = text.title()
-            return partial, ""
-    # Couldn't figure out what to change — ask to go through booking again
-    return partial, (
-        "I wasn't sure what to change. Let me walk you through the booking again. "
-        "What would you like to update — date/time, name, or email?"
-    )
 
 
 def build_conversation_summary(conversation_data: list[dict[str, Any]], max_turns: int = 6) -> str:
@@ -480,8 +454,7 @@ def process_meeting_step(
 
     # ── verification ──────────────────────────────────────────────────────────
     if step == "verification":
-        lower = text.lower()
-        if lower in ("confirm", "yes", "correct", "ok", "okay", "looks good", "confirmed"):
+        if text.lower().strip() == "confirm":
             state["step"] = "completed"
             return (
                 "Your meeting has been booked! You'll receive a confirmation email shortly. "
@@ -491,11 +464,13 @@ def process_meeting_step(
                 dict(partial),
             )
 
-        updated_partial, clarification = _apply_correction(partial, text)
-        state["partial"] = updated_partial
-        if clarification:
-            return clarification + _NO_FOOTER, state, False, None
-        return _build_verification_message(updated_partial), state, False, None
+        # Anything other than "confirm" — re-ask without allowing edits
+        return (
+            _build_verification_message(partial),
+            state,
+            False,
+            None,
+        )
 
     # Should never reach here
     state["step"] = "idle"
