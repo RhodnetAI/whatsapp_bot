@@ -9,6 +9,7 @@ from app.models.schemas import (
     BotIdentityUpdate,
     BotSelectRequest,
     CompanyInfoUpdate,
+    ConversationHistoryUpdate,
     EnhancedRetrievalUpdate,
     FlowConfigUpdate,
     InstructionsUpdate,
@@ -103,6 +104,7 @@ async def get_settings(token: dict = Depends(verify_token)):
     enhanced_retrieval_enabled = (
         bool(row.get("enhanced_retrieval_enabled")) if table == "information_bot" else False
     )
+    conversation_history_enabled = bool(row.get("conversation_history_enabled", True))
 
     return SettingsResponse(
         active_bot=table,
@@ -118,6 +120,7 @@ async def get_settings(token: dict = Depends(verify_token)):
         flow_builder=flow,
         section_states=section_states,
         enhanced_retrieval_enabled=enhanced_retrieval_enabled,
+        conversation_history_enabled=conversation_history_enabled,
         setup_completed=True,
     )
 
@@ -253,5 +256,17 @@ async def update_enhanced_retrieval(
 ):
     _db().table("information_bot").update(
         {"enhanced_retrieval_enabled": payload.enabled}
+    ).eq("id", SINGLETON_ID).execute()
+    return {"ok": True}
+
+
+@router.put("/conversation-history")
+async def update_conversation_history(
+    payload: ConversationHistoryUpdate,
+    token: dict = Depends(verify_token),
+):
+    table = _get_active_bot_table()
+    _db().table(table).update(
+        {"conversation_history_enabled": payload.enabled}
     ).eq("id", SINGLETON_ID).execute()
     return {"ok": True}

@@ -80,7 +80,8 @@ async def get_active_bot() -> dict[str, Any]:
         .select(
             "is_selected, bot_name, greeting, summarized_instruction, "
             "company_info_enabled, company_address, company_phone, company_email, social_handles, "
-            "products_services_enabled, knowledge_enabled, enhanced_retrieval_enabled"
+            "products_services_enabled, knowledge_enabled, enhanced_retrieval_enabled, "
+            "conversation_history_enabled"
         )
         .eq("id", SINGLETON_ID)
         .limit(1)
@@ -97,7 +98,7 @@ async def get_active_bot() -> dict[str, Any]:
             first_row(
                 _db()
                 .table("sales_bot")
-                .select("bot_name, greeting, summarized_instruction")
+                .select("bot_name, greeting, summarized_instruction, conversation_history_enabled")
                 .eq("id", SINGLETON_ID)
                 .limit(1)
                 .execute()
@@ -117,6 +118,7 @@ async def get_active_bot() -> dict[str, Any]:
         "products_services_enabled": is_info and bool(row.get("products_services_enabled")),
         "knowledge_enabled": is_info and bool(row.get("knowledge_enabled")),
         "enhanced_retrieval_enabled": is_info and bool(row.get("enhanced_retrieval_enabled")),
+        "conversation_history_enabled": bool(row.get("conversation_history_enabled", True)),
         "company_address": row.get("company_address") or "" if is_info else "",
         "company_phone": row.get("company_phone") or "" if is_info else "",
         "company_email": row.get("company_email") or "" if is_info else "",
@@ -340,11 +342,13 @@ async def generate_bot_reply(
     bot = await get_active_bot()
     prior_entries = conversation_data[:-1] if conversation_data else []
 
-    if is_first_message_of_session(prior_entries):
-        reply = bot["greeting"] or f"Hello! I'm {bot['bot_name'] or 'your assistant'}."
-        return reply, bot
+    is_new_session = is_first_message_of_session(prior_entries)
 
-    history = fetch_recent_turns(prior_entries)
+    if bot.get("conversation_history_enabled", True):
+        history = fetch_recent_turns(prior_entries)
+    else:
+        history = []
+
     prompt_config = await _fetch_prompt_config()
     summarized_instruction = bot["summarized_instruction"] or f"You are {bot['bot_name'] or 'a helpful assistant'}."
 
@@ -374,4 +378,8 @@ async def generate_bot_reply(
 
     messages = build_messages(summarized_instruction, prompt_config, history, user_message, extra_sections)
     reply = await generate_ai_reply(messages)
+
+    if is_new_session and bot["greeting"]:
+        reply = f"{bot['greeting']}\n\n{reply}"
+
     return reply, bot

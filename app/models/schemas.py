@@ -255,6 +255,10 @@ class EnhancedRetrievalUpdate(BaseModel):
     enabled: bool
 
 
+class ConversationHistoryUpdate(BaseModel):
+    enabled: bool
+
+
 class SettingsResponse(BaseModel):
     active_bot: str = "information_bot"
     bot_name: str | None = None
@@ -269,4 +273,5 @@ class SettingsResponse(BaseModel):
     flow_builder: Optional[PipelineConfig] = None
     section_states: dict = {}
     enhanced_retrieval_enabled: bool = False
+    conversation_history_enabled: bool = True
     setup_completed: bool = False
