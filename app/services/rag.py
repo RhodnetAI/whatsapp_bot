@@ -274,7 +274,7 @@ async def _classify_and_rewrite_query(user_message: str, chat_history: Optional[
     client = OpenAI(api_key=settings.openai_api_key)
     response = await asyncio.to_thread(
         client.responses.create,
-        model="gpt-4o-mini",
+        model="gpt-5-nano-2025-08-07",
         instructions=_INTENT_COMBINED_SYSTEM_PROMPT,
         input=human_content,
     )

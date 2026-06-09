@@ -81,7 +81,7 @@ async def generate_summarized_instruction(raw_text: str) -> str:
         client = OpenAI(api_key=settings.openai_api_key)
         response = await asyncio.to_thread(
             client.responses.create,
-            model="gpt-4o-mini",
+            model="gpt-5-nano-2025-08-07",
             temperature=0.2,
             instructions=system_prompt,
             input=raw_text,

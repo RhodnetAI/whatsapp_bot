@@ -20,3 +20,4 @@ structlog>=24.0.0
 voyageai>=0.1.0
 langsmith>=0.0.40
 httpx>=0.26.0
+google-auth>=2.0.0

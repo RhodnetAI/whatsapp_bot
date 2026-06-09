@@ -17,7 +17,7 @@ async def generate_ai_reply(messages_for_ai: list[dict[str, str]]) -> str:
         ]
         response = await asyncio.to_thread(
             client.responses.create,
-            model="gpt-4o-mini",
+            model="gpt-5-nano-2025-08-07",
             input=input_messages,
         )
         return (response.output_text or "").strip()

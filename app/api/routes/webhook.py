@@ -128,7 +128,75 @@ async def _generate_response_and_update(
             # history table read/write is needed).
             logger.info("Using bot conversation AI for sender=%s", sender)
 
-            ai_reply, _ = await generate_bot_reply(text, conversation_data)
+            ai_reply: str = ""
+
+            # ── Meeting booking flow (runs only when scheduler_enabled) ───────
+            _scheduler_enabled = False
+            _meeting_session: dict[str, Any] | None = None
+            _meeting_handled = False
+
+            try:
+                _ib = (
+                    supabase.table("information_bot")
+                    .select("scheduler_enabled")
+                    .eq("id", 1)
+                    .limit(1)
+                    .execute()
+                )
+                _ib_row = first_row(_ib) or {}
+                _scheduler_enabled = bool(_ib_row.get("scheduler_enabled", False))
+            except Exception:
+                logger.exception("Failed to check scheduler_enabled for sender=%s", sender)
+
+            if _scheduler_enabled:
+                try:
+                    from app.services.meeting_bot import (
+                        get_session_state as _get_meeting_session,
+                        process_meeting_message as _process_meeting,
+                    )
+                    _meeting_session = await _get_meeting_session(sender)
+                    _step = _meeting_session.get("flow_step", "idle")
+                    if _step not in ("idle", "completed", "declined"):
+                        ai_reply = await _process_meeting(
+                            sender, text, _meeting_session, conversation_data
+                        )
+                        _meeting_handled = True
+                except Exception:
+                    logger.exception("Meeting bot flow error for sender=%s", sender)
+
+            # Normal Knowledge AI reply (always runs when meeting bot didn't handle)
+            if not ai_reply:
+                ai_reply, _ = await generate_bot_reply(text, conversation_data)
+
+            # Intent detection — suggest a meeting when idle and not yet suggested
+            if _scheduler_enabled and not _meeting_handled and _meeting_session is not None:
+                try:
+                    from app.services.meeting_bot import (
+                        detect_meeting_intent as _detect_intent,
+                        upsert_session_state as _upsert_meeting,
+                    )
+                    _step = _meeting_session.get("flow_step", "idle")
+                    if (
+                        _step == "idle"
+                        and not _meeting_session.get("declined_today")
+                        and not _meeting_session.get("suggestion_made")
+                        and await _detect_intent(conversation_data)
+                    ):
+                        ai_reply += (
+                            "\n\n---\n"
+                            "Would you like to schedule a meeting with us? "
+                            "Please reply *Yes* or *No* to continue."
+                        )
+                        await _upsert_meeting(
+                            sender,
+                            "asked_yes_no",
+                            {},
+                            declined_today=False,
+                            suggestion_made=True,
+                        )
+                except Exception:
+                    logger.exception("Intent detection error for sender=%s", sender)
+            # ── End meeting booking flow ───────────────────────────────────────
 
             lead_label = await classify_knowledge_lead_label(
                 text,
