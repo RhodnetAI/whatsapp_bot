@@ -81,7 +81,7 @@ async def get_active_bot() -> dict[str, Any]:
             "is_selected, bot_name, greeting, summarized_instruction, "
             "company_info_enabled, company_address, company_phone, company_email, social_handles, "
             "products_services_enabled, knowledge_enabled, enhanced_retrieval_enabled, "
-            "conversation_history_enabled"
+            "conversation_history_enabled, scheduler_enabled"
         )
         .eq("id", SINGLETON_ID)
         .limit(1)
@@ -119,6 +119,7 @@ async def get_active_bot() -> dict[str, Any]:
         "knowledge_enabled": is_info and bool(row.get("knowledge_enabled")),
         "enhanced_retrieval_enabled": is_info and bool(row.get("enhanced_retrieval_enabled")),
         "conversation_history_enabled": bool(row.get("conversation_history_enabled", True)),
+        "scheduler_enabled": is_info and bool(row.get("scheduler_enabled")),
         "company_address": row.get("company_address") or "" if is_info else "",
         "company_phone": row.get("company_phone") or "" if is_info else "",
         "company_email": row.get("company_email") or "" if is_info else "",
@@ -356,8 +357,15 @@ async def generate_bot_reply(
     summarized_instruction = bot["summarized_instruction"] or f"You are {bot['bot_name'] or 'a helpful assistant'}."
 
     # Information Agent only: inject enabled sections into the prompt in spec order:
-    # Company Info → Products & Services → Retrieved Knowledge Context.
+    # Scheduler suppression → Company Info → Products & Services → Retrieved Knowledge Context.
     extra_sections: list[str] = []
+    if bot["bot_table"] == "information_bot" and not bot.get("scheduler_enabled"):
+        extra_sections.append(
+            "IMPORTANT RESTRICTION: Do NOT mention, suggest, or imply anything related to "
+            "scheduling, meetings, consultations, appointments, or bookings in any response. "
+            "Never ask the user if they want to book or schedule anything. "
+            "Answer only what the user asked without any scheduling-related call to action."
+        )
     if bot["bot_table"] == "information_bot":
         if bot["company_info_enabled"]:
             section = _build_company_info_section(bot, prompt_config)
