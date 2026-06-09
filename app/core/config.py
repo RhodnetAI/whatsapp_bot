@@ -39,6 +39,8 @@ class Settings:
     gmail_app_password: str
     admin_email: str
     google_service_account_file: str
+    google_calendar_id: str
+    google_calendar_timezone: str
 
 
 settings = Settings(
@@ -65,4 +67,6 @@ settings = Settings(
     gmail_app_password=os.getenv("GMAIL_APP_PASSWORD", ""),
     admin_email=os.getenv("ADMIN_EMAIL", ""),
     google_service_account_file=os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", ""),
+    google_calendar_id=os.getenv("GOOGLE_CALENDAR_ID", "primary"),
+    google_calendar_timezone=os.getenv("GOOGLE_CALENDAR_TIMEZONE", "UTC"),
 )

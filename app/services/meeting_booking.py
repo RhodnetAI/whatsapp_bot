@@ -224,37 +224,202 @@ def get_available_slots(days_ahead: int = 7) -> list[dict[str, str]]:
     return available
 
 
-def _format_slots_message(slots: list[dict[str, str]]) -> str:
+_DAY_NAMES: dict[str, int] = {
+    "monday": 0, "mon": 0,
+    "tuesday": 1, "tue": 1, "tues": 1,
+    "wednesday": 2, "wed": 2,
+    "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
+    "friday": 4, "fri": 4,
+    "saturday": 5, "sat": 5,
+    "sunday": 6, "sun": 6,
+}
+
+_MONTH_NAMES: dict[str, int] = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2,
+    "mar": 3, "march": 3, "apr": 4, "april": 4,
+    "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
+
+def _format_time_12h(t: str) -> str:
+    """Convert "HH:MM" (24h) to "H:MM AM/PM" (12h)."""
+    try:
+        h, m = t.split(":")
+        h, m = int(h), int(m)
+        period = "AM" if h < 12 else "PM"
+        h12 = h % 12 or 12
+        return f"{h12}:{m:02d} {period}"
+    except Exception:
+        return t
+
+
+def _merge_slots_to_blocks(slots: list[dict[str, str]]) -> dict[str, dict]:
+    """Group individual 30-min slots by date and merge consecutive ones into blocks.
+
+    Returns an ordered dict keyed by date string (sorted ascending):
+      {"YYYY-MM-DD": {"day_label": "Monday, Jun 15",
+                      "blocks": [{"start": "HH:MM", "end": "HH:MM"}, ...]}}
+    """
+    by_date: dict[str, list[dict[str, str]]] = {}
+    for slot in slots:
+        by_date.setdefault(slot["date"], []).append(slot)
+
+    result: dict[str, dict] = {}
+    for date_str in sorted(by_date.keys()):
+        day_slots = sorted(by_date[date_str], key=lambda s: s["start"])
+        blocks: list[dict[str, str]] = []
+        if day_slots:
+            blk_start = day_slots[0]["start"]
+            blk_end = day_slots[0]["end"]
+            for s in day_slots[1:]:
+                if s["start"] == blk_end:
+                    blk_end = s["end"]          # extend current block
+                else:
+                    blocks.append({"start": blk_start, "end": blk_end})
+                    blk_start, blk_end = s["start"], s["end"]
+            blocks.append({"start": blk_start, "end": blk_end})
+
+        try:
+            day_label = datetime.date.fromisoformat(date_str).strftime("%A, %b %d")
+        except ValueError:
+            day_label = date_str
+
+        result[date_str] = {"day_label": day_label, "blocks": blocks}
+
+    return result
+
+
+def _format_grouped_slots_message(slots: list[dict[str, str]]) -> str:
     if not slots:
         return (
             "I'm sorry, there are no available slots in the next 7 days. "
             "Please check back later."
         )
-    lines = ["Here are the available time slots:\n"]
-    for i, slot in enumerate(slots, start=1):
-        lines.append(f"{i}. {slot['label']}")
-    lines.append("\nPlease reply with the number of your preferred slot.")
+    grouped = _merge_slots_to_blocks(slots)
+    lines = ["Available slots:\n"]
+    for day_info in grouped.values():
+        lines.append(f"*{day_info['day_label']}*")
+        for block in day_info["blocks"]:
+            lines.append(f"  {_format_time_12h(block['start'])} – {_format_time_12h(block['end'])}")
+        lines.append("")
+    lines.append("Reply with your preferred day and time.")
+    lines.append("For example: *Monday 10:30 AM*")
     lines.append(_NO_FOOTER)
     return "\n".join(lines)
 
 
-def _parse_slot_selection(
-    user_message: str, slots: list[dict[str, str]]
+def _parse_user_time_selection(
+    user_message: str,
+    slots: list[dict[str, str]],
 ) -> dict[str, str] | None:
-    """Try to match user_message to one of the shown slots by number or label."""
-    text = user_message.strip()
-    # Try numeric selection
-    try:
-        idx = int(text) - 1
-        if 0 <= idx < len(slots):
-            return slots[idx]
-    except ValueError:
-        pass
-    # Try partial label match (case-insensitive)
-    text_lower = text.lower()
+    """Parse "Monday 10:30 AM" style input and return the matching 30-min slot.
+
+    Recognises:
+      - Day-of-week names (full or short) — matched against dates in `slots`
+      - Month/day references ("Jun 15", "15 June", "6/15")
+      - Times in 12h ("10:30 AM", "10 AM") or 24h ("14:30") — floored to nearest :00 or :30
+    Returns the first matching slot from `slots`, or None.
+    """
+    text = re.sub(r"[,@]", " ", user_message.strip().lower())
+    available_dates = sorted({s["date"] for s in slots})
+    target_date: str | None = None
+
+    # ── Day-of-week name ──────────────────────────────────────────────────
+    for name, weekday in _DAY_NAMES.items():
+        if re.search(r"\b" + name + r"\b", text):
+            for date_str in available_dates:
+                try:
+                    if datetime.date.fromisoformat(date_str).weekday() == weekday:
+                        target_date = date_str
+                        break
+                except ValueError:
+                    continue
+            if target_date:
+                break
+
+    # ── Month-name + day number ───────────────────────────────────────────
+    if not target_date:
+        for m_name, m_num in _MONTH_NAMES.items():
+            # "jun 15" or "june 15"
+            m = re.search(r"\b" + m_name + r"\w*\s+(\d{1,2})\b", text)
+            if m:
+                day_num = int(m.group(1))
+            else:
+                # "15 jun" or "15 june"
+                m = re.search(r"\b(\d{1,2})\s+" + m_name + r"\w*\b", text)
+                if m:
+                    day_num = int(m.group(1))
+                else:
+                    continue
+            for date_str in available_dates:
+                try:
+                    d = datetime.date.fromisoformat(date_str)
+                    if d.month == m_num and d.day == day_num:
+                        target_date = date_str
+                        break
+                except ValueError:
+                    continue
+            if target_date:
+                break
+
+    # ── Numeric month/day: "6/15" or "6-15" ──────────────────────────────
+    if not target_date:
+        m = re.search(r"\b(\d{1,2})[/\-](\d{1,2})\b", text)
+        if m:
+            m_num, day_num = int(m.group(1)), int(m.group(2))
+            for date_str in available_dates:
+                try:
+                    d = datetime.date.fromisoformat(date_str)
+                    if d.month == m_num and d.day == day_num:
+                        target_date = date_str
+                        break
+                except ValueError:
+                    continue
+
+    if not target_date:
+        return None
+
+    # ── Parse time ────────────────────────────────────────────────────────
+    hour: int | None = None
+    minute: int = 0
+
+    # "HH:MM" optionally followed by am/pm
+    m = re.search(r"\b(\d{1,2}):(\d{2})\s*(am|pm)?\b", text)
+    if m:
+        hour, minute = int(m.group(1)), int(m.group(2))
+        period = m.group(3)
+        if period == "pm" and hour != 12:
+            hour += 12
+        elif period == "am" and hour == 12:
+            hour = 0
+
+    # "HH am/pm" (no colon)
+    if hour is None:
+        m = re.search(r"\b(\d{1,2})\s*(am|pm)\b", text)
+        if m:
+            hour = int(m.group(1))
+            minute = 0
+            period = m.group(2)
+            if period == "pm" and hour != 12:
+                hour += 12
+            elif period == "am" and hour == 12:
+                hour = 0
+
+    if hour is None:
+        return None
+
+    # Floor to nearest 30-minute boundary (e.g. 10:45 → 10:30, 10:14 → 10:00)
+    minute = 0 if minute < 30 else 30
+    time_str = f"{hour:02d}:{minute:02d}"
+
+    # ── Find exact slot ───────────────────────────────────────────────────
     for slot in slots:
-        if text_lower in slot["label"].lower():
+        if slot["date"] == target_date and slot["start"] == time_str:
             return slot
+
     return None
 
 
@@ -312,6 +477,8 @@ def save_booking(
     partial: dict[str, Any],
     meet_link: str,
     summary: str,
+    calendar_event_id: str = "",
+    calendar_event_link: str = "",
 ) -> str | None:
     """Insert a row into meeting_bookings. Returns the new row's id or None."""
     try:
@@ -327,7 +494,7 @@ def save_booking(
 
         meeting_dt = datetime.datetime.fromisoformat(f"{slot_date}T{slot_start}:00+00:00")
 
-        row = {
+        row: dict[str, Any] = {
             "sender": sender,
             "user_name": user_name,
             "user_email": user_email,
@@ -336,6 +503,11 @@ def save_booking(
             "meet_link": meet_link,
             "conversation_summary": summary,
         }
+        if calendar_event_id:
+            row["calendar_event_id"] = calendar_event_id
+        if calendar_event_link:
+            row["calendar_event_link"] = calendar_event_link
+
         res = _db().table("meeting_bookings").insert(row).execute()
         inserted = first_row(res)
         return inserted.get("id") if isinstance(inserted, dict) else None
@@ -378,22 +550,25 @@ def process_meeting_step(
     # ── showing_slots ─────────────────────────────────────────────────────────
     if step == "showing_slots":
         shown = state.get("shown_slots", [])
-        selected = _parse_slot_selection(text, shown)
+        selected = _parse_user_time_selection(text, shown)
         if selected:
             partial["slot_date"] = selected["date"]
             partial["slot_start"] = selected["start"]
             partial["slot_end"] = selected["end"]
             state["partial"] = partial
             state["step"] = "asked_name"
+            slot_label = (
+                f"{datetime.date.fromisoformat(selected['date']).strftime('%A, %b %d')} "
+                f"{_format_time_12h(selected['start'])} – {_format_time_12h(selected['end'])}"
+            )
             return (
-                f"Great choice! I've noted *{selected['label']}*.\n\n"
-                "What is your full name?" + _NO_FOOTER,
+                f"Great choice! I've noted *{slot_label}*.\n\n"
+                "What is your full name?\n\nExample: *John Smith*" + _NO_FOOTER,
                 state,
                 False,
                 None,
             )
         else:
-            # Re-show slots
             slots = get_available_slots()
             if not slots:
                 state["step"] = "idle"
@@ -406,8 +581,8 @@ def process_meeting_step(
                 )
             state["shown_slots"] = slots
             return (
-                "I didn't recognise that selection. Please choose a number from the list:\n\n"
-                + _format_slots_message(slots),
+                "Please choose a valid start time from the available blocks:\n\n"
+                + _format_grouped_slots_message(slots),
                 state,
                 False,
                 None,
@@ -426,7 +601,7 @@ def process_meeting_step(
         state["partial"] = partial
         state["step"] = "asked_email"
         return (
-            f"Thanks, *{text}*! What is your email address?" + _NO_FOOTER,
+            f"Thanks, *{text}*! What is your email address?\n\nExample: *john@example.com*" + _NO_FOOTER,
             state,
             False,
             None,
@@ -500,7 +675,7 @@ def handle_yes_no_response(
             )
         state["step"] = "showing_slots"
         state["shown_slots"] = slots
-        return _format_slots_message(slots), state
+        return _format_grouped_slots_message(slots), state
 
     if _NO_RE.match(text):
         state["step"] = "declined"

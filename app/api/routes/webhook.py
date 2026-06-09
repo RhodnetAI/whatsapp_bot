@@ -28,8 +28,8 @@ from app.services.meeting_booking import (
     save_booking,
     set_meeting_state,
 )
-from app.services.email_service import send_meeting_confirmation
-from app.services.meet_service import generate_meet_link
+from app.services.email_service import build_booking_body, send_meeting_confirmation
+from app.services.meet_service import create_meeting_event
 
 
 router = APIRouter(tags=["webhook"])
@@ -194,20 +194,67 @@ async def _generate_response_and_update(
                         slot_end = booking_data.get("slot_end", "")
                         end_mins = int(slot_end.split(":")[0]) * 60 + int(slot_end.split(":")[1]) if slot_end else start_mins + 30
                         duration = max(30, end_mins - start_mins)
-                        meet_link = generate_meet_link(meeting_dt, duration)
                         summary = build_conversation_summary(conversation_data)
-                        save_booking(sender, booking_data, meet_link, summary)
-                        asyncio.create_task(
-                            asyncio.to_thread(
-                                send_meeting_confirmation,
-                                user_email=booking_data["user_email"],
-                                user_name=booking_data["user_name"],
-                                meeting_datetime=meeting_dt,
-                                duration_minutes=duration,
-                                meet_link=meet_link,
-                                summary=summary,
-                            )
+
+                        # Build attendees list from user + admin emails
+                        attendees: list[str] = [booking_data["user_email"]]
+                        if settings.admin_email and settings.admin_email != booking_data["user_email"]:
+                            attendees.append(settings.admin_email)
+
+                        description = (
+                            f"Booked via WhatsApp for {booking_data['user_name']} "
+                            f"({booking_data['user_email']}).\n\n"
+                            f"Conversation context:\n{summary}"
                         )
+
+                        logger.info(
+                            "Creating calendar event for sender=%s attendees=%s",
+                            sender, attendees,
+                        )
+                        meet_link, calendar_event_id, calendar_event_link = await asyncio.to_thread(
+                            create_meeting_event,
+                            meeting_dt,
+                            duration,
+                            "Business Consultation",
+                            attendees,
+                            description,
+                        )
+                        logger.info(
+                            "Calendar event result: meet=%s event_id=%s calendar=%s",
+                            meet_link, calendar_event_id, calendar_event_link,
+                        )
+
+                        save_booking(
+                            sender, booking_data, meet_link, summary,
+                            calendar_event_id=calendar_event_id,
+                            calendar_event_link=calendar_event_link,
+                        )
+
+                        logger.info("Sending confirmation email for sender=%s to %s", sender, booking_data["user_email"])
+                        await asyncio.to_thread(
+                            send_meeting_confirmation,
+                            user_email=booking_data["user_email"],
+                            user_name=booking_data["user_name"],
+                            meeting_datetime=meeting_dt,
+                            duration_minutes=duration,
+                            meet_link=meet_link,
+                            summary=summary,
+                            calendar_event_link=calendar_event_link,
+                        )
+                        logger.info("Confirmation email completed for sender=%s", sender)
+
+                        # Second WhatsApp message: full booking details
+                        whatsapp_summary = build_booking_body(
+                            user_name=booking_data["user_name"],
+                            user_email=booking_data["user_email"],
+                            meeting_datetime=meeting_dt,
+                            duration_minutes=duration,
+                            meet_link=meet_link,
+                            summary=summary,
+                            calendar_event_link=calendar_event_link,
+                        )
+                        messages_to_send.append(whatsapp_summary)
+
                         logger.info(
                             "Booking completed for sender=%s meet_link=%s", sender, meet_link
                         )
