@@ -35,12 +35,10 @@ class Settings:
     supabase_service_role_key: str | None
     admin_username: str
     admin_password: str
-    # Meeting booking emails
     gmail_user: str
     gmail_app_password: str
     admin_email: str
-    # Google Meet API (service account JSON string)
-    google_service_account_json: str
+    google_service_account_file: str
 
 
 settings = Settings(
@@ -66,5 +64,5 @@ settings = Settings(
     gmail_user=os.getenv("GMAIL_USER", ""),
     gmail_app_password=os.getenv("GMAIL_APP_PASSWORD", ""),
     admin_email=os.getenv("ADMIN_EMAIL", ""),
-    google_service_account_json=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
+    google_service_account_file=os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", ""),
 )

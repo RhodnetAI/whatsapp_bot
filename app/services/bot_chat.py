@@ -326,7 +326,7 @@ def build_messages(
 
 async def generate_bot_reply(
     user_message: str, conversation_data: list[dict[str, Any]]
-) -> tuple[str, dict[str, Any]]:
+) -> tuple[str, dict[str, Any], str]:
     """Generate the reply for an incoming message from the active bot, using
     whatsapp_conversations.conversation as the sole source of session/greeting
     detection and conversational memory (no separate history tables).
@@ -337,7 +337,10 @@ async def generate_bot_reply(
     and already include both AI-handled user turns and manually-sent admin
     messages (clients.py records those into the same array).
 
-    Returns (reply_text, bot) where `bot` is the active-bot info dict.
+    Returns (reply_text, bot, session_greeting) where `session_greeting` is
+    the configured greeting string if this is the first message of the day's
+    session (to be sent as a separate WhatsApp message before reply_text), or
+    an empty string otherwise.
     """
     bot = await get_active_bot()
     prior_entries = conversation_data[:-1] if conversation_data else []
@@ -379,7 +382,5 @@ async def generate_bot_reply(
     messages = build_messages(summarized_instruction, prompt_config, history, user_message, extra_sections)
     reply = await generate_ai_reply(messages)
 
-    if is_new_session and bot["greeting"]:
-        reply = f"{bot['greeting']}\n\n{reply}"
-
-    return reply, bot
+    session_greeting = (bot["greeting"] or "") if is_new_session else ""
+    return reply, bot, session_greeting

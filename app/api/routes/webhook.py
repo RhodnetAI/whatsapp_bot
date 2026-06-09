@@ -18,6 +18,18 @@ from app.services.flow_ai import (
     get_flow_lead_label,
 )
 from app.services.rag import classify_knowledge_lead_label
+from app.services.meeting_booking import (
+    BOOKING_FLOW_STEPS,
+    build_conversation_summary,
+    get_meeting_state,
+    handle_yes_no_response,
+    is_suppressed_for_session,
+    process_meeting_step,
+    save_booking,
+    set_meeting_state,
+)
+from app.services.email_service import send_meeting_confirmation
+from app.services.meet_service import generate_meet_link
 
 
 router = APIRouter(tags=["webhook"])
@@ -47,6 +59,23 @@ async def receive_message(request: Request) -> dict[str, str]:
     return {"status": "received"}
 
 
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _send_messages(sender: str, messages: list[str]) -> None:
+    """Send each non-empty message to the sender in order."""
+    for msg in messages:
+        if not msg or not msg.strip():
+            continue
+        try:
+            resp = send_whatsapp_text(sender, msg)
+            if resp.status_code >= 400:
+                logger.error("Meta send error %s: %s", resp.status_code, resp.text)
+        except Exception:
+            logger.exception("Meta send failure for sender=%s", sender)
+
+
 async def _generate_response_and_update(
     sender: str,
     text: str,
@@ -56,9 +85,9 @@ async def _generate_response_and_update(
 ) -> None:
     """Background task: generate AI response (flow or knowledge) and update conversation asynchronously."""
     db_client = _conversation_client()
-    
+
     try:
-        # Load flow builder state
+        # ── Load flow builder ──────────────────────────────────────────────
         flow_builder = None
         try:
             flow_res = (
@@ -73,13 +102,16 @@ async def _generate_response_and_update(
                 flow_builder = flow_row.get("flow_builder")
         except Exception:
             logger.exception("Failed to load flow builder state")
-        
+
         ai_reply: str = ""
         updated_flow_state: dict[str, Any] | None = None
+        lead_label: str = old_lead_label or "general"
+        messages_to_send: list[str] = []
+
         flow_enabled = should_use_flow(flow_builder)
         flow_state = get_flow_state(conversation_data)
 
-        # Check if flow completion was already saved in database (handles race conditions)
+        # Check if flow already completed (handles race conditions)
         flow_already_completed = False
         if flow_enabled:
             try:
@@ -100,117 +132,170 @@ async def _generate_response_and_update(
                 logger.exception("Failed to check flow completion status for sender=%s", sender)
 
         if flow_enabled and (flow_state.get("completed") or flow_already_completed):
-            logger.info(
-                "Flow already completed for sender=%s; switching to Knowledge AI",
-                sender,
-            )
+            logger.info("Flow already completed for sender=%s; switching to Knowledge AI", sender)
             flow_enabled = False
 
+        # ── Flow AI path (unchanged) ───────────────────────────────────────
         if flow_enabled:
-            # Use Flow AI for conversation
             logger.info("Using Flow AI for sender=%s", sender)
-            ai_reply, updated_flow_state = process_flow_message(text, flow_state, conversation_data, flow_builder)
+            ai_reply, updated_flow_state = process_flow_message(
+                text, flow_state, conversation_data, flow_builder
+            )
             if updated_flow_state and updated_flow_state.get("completed") and ai_reply == "":
                 logger.info(
-                    "Flow completed but flow message returned empty reply for sender=%s; falling back to Knowledge AI",
+                    "Flow completed but returned empty reply for sender=%s; falling back to Knowledge AI",
                     sender,
                 )
                 flow_enabled = False
 
+        # ── Knowledge / bot path (with scheduler integration) ─────────────
         if not flow_enabled:
-            # Use the active bot (Information Agent or Sales Agent): greeting on
-            # the first message of the day's session, otherwise summarized
-            # instructions + the last 5 turns of conversational memory — both
-            # derived directly from whatsapp_conversations.conversation (the
-            # single source of truth; conversation_data already includes the
-            # just-appended current message as its last entry, and the reply
-            # is persisted back into the same row below, so no separate
-            # history table read/write is needed).
             logger.info("Using bot conversation AI for sender=%s", sender)
 
-            ai_reply: str = ""
-
-            # ── Meeting booking flow (runs only when scheduler_enabled) ───────
-            _scheduler_enabled = False
-            _meeting_session: dict[str, Any] | None = None
-            _meeting_handled = False
-
+            # Load scheduler_enabled once
+            scheduler_enabled = False
             try:
-                _ib = (
-                    supabase.table("information_bot")
+                info_res = (
+                    db_client.table("information_bot")
                     .select("scheduler_enabled")
                     .eq("id", 1)
                     .limit(1)
                     .execute()
                 )
-                _ib_row = first_row(_ib) or {}
-                _scheduler_enabled = bool(_ib_row.get("scheduler_enabled", False))
+                info_row = first_row(info_res) or {}
+                scheduler_enabled = bool(info_row.get("scheduler_enabled"))
             except Exception:
-                logger.exception("Failed to check scheduler_enabled for sender=%s", sender)
+                logger.exception("Failed to load scheduler_enabled for sender=%s", sender)
 
-            if _scheduler_enabled:
-                try:
-                    from app.services.meeting_bot import (
-                        get_session_state as _get_meeting_session,
-                        process_meeting_message as _process_meeting,
+            meeting_state = get_meeting_state(conversation_data) if scheduler_enabled else None
+
+            # ── Pure booking-flow step (no normal AI) ──────────────────────
+            if scheduler_enabled and meeting_state and meeting_state["step"] in BOOKING_FLOW_STEPS:
+                logger.info(
+                    "Meeting booking flow step=%s for sender=%s",
+                    meeting_state["step"],
+                    sender,
+                )
+                booking_reply, meeting_state, is_complete, booking_data = process_meeting_step(
+                    text, conversation_data, meeting_state, sender
+                )
+                ai_reply = booking_reply
+                set_meeting_state(conversation_data, meeting_state)
+                messages_to_send = [ai_reply]
+
+                if is_complete and booking_data:
+                    try:
+                        slot_date = booking_data["slot_date"]
+                        slot_start = booking_data["slot_start"]
+                        meeting_dt = datetime.datetime.fromisoformat(
+                            f"{slot_date}T{slot_start}:00+00:00"
+                        )
+                        start_mins = int(slot_start.split(":")[0]) * 60 + int(slot_start.split(":")[1])
+                        slot_end = booking_data.get("slot_end", "")
+                        end_mins = int(slot_end.split(":")[0]) * 60 + int(slot_end.split(":")[1]) if slot_end else start_mins + 30
+                        duration = max(30, end_mins - start_mins)
+                        meet_link = generate_meet_link(meeting_dt, duration)
+                        summary = build_conversation_summary(conversation_data)
+                        save_booking(sender, booking_data, meet_link, summary)
+                        asyncio.create_task(
+                            asyncio.to_thread(
+                                send_meeting_confirmation,
+                                user_email=booking_data["user_email"],
+                                user_name=booking_data["user_name"],
+                                meeting_datetime=meeting_dt,
+                                duration_minutes=duration,
+                                meet_link=meet_link,
+                                summary=summary,
+                            )
+                        )
+                        logger.info(
+                            "Booking completed for sender=%s meet_link=%s", sender, meet_link
+                        )
+                    except Exception:
+                        logger.exception("Failed to finalise booking for sender=%s", sender)
+
+            # ── asked_yes_no: hybrid — check yes/no, else run normal AI ───
+            elif scheduler_enabled and meeting_state and meeting_state["step"] == "asked_yes_no":
+                extra_msg, meeting_state = handle_yes_no_response(text, meeting_state)
+
+                if extra_msg is not None:
+                    # User answered yes or no — no normal AI needed
+                    ai_reply = extra_msg
+                    set_meeting_state(conversation_data, meeting_state)
+                    messages_to_send = [ai_reply]
+                else:
+                    # User sent unrelated message — run normal AI
+                    ai_reply, _, session_greeting = await generate_bot_reply(
+                        text, conversation_data
                     )
-                    _meeting_session = await _get_meeting_session(sender)
-                    _step = _meeting_session.get("flow_step", "idle")
-                    if _step not in ("idle", "completed", "declined"):
-                        ai_reply = await _process_meeting(
-                            sender, text, _meeting_session, conversation_data
-                        )
-                        _meeting_handled = True
-                except Exception:
-                    logger.exception("Meeting bot flow error for sender=%s", sender)
-
-            # Normal Knowledge AI reply (always runs when meeting bot didn't handle)
-            if not ai_reply:
-                ai_reply, _ = await generate_bot_reply(text, conversation_data)
-
-            # Intent detection — suggest a meeting when idle and not yet suggested
-            if _scheduler_enabled and not _meeting_handled and _meeting_session is not None:
-                try:
-                    from app.services.meeting_bot import (
-                        detect_meeting_intent as _detect_intent,
-                        upsert_session_state as _upsert_meeting,
+                    lead_label = await classify_knowledge_lead_label(
+                        text, ai_reply, conversation_data, old_label=old_lead_label
                     )
-                    _step = _meeting_session.get("flow_step", "idle")
-                    if (
-                        _step == "idle"
-                        and not _meeting_session.get("declined_today")
-                        and not _meeting_session.get("suggestion_made")
-                        and await _detect_intent(conversation_data)
-                    ):
-                        ai_reply += (
-                            "\n\n---\n"
-                            "Would you like to schedule a meeting with us? "
-                            "Please reply *Yes* or *No* to continue."
-                        )
-                        await _upsert_meeting(
-                            sender,
-                            "asked_yes_no",
-                            {},
-                            declined_today=False,
-                            suggestion_made=True,
-                        )
-                except Exception:
-                    logger.exception("Intent detection error for sender=%s", sender)
-            # ── End meeting booking flow ───────────────────────────────────────
 
-            lead_label = await classify_knowledge_lead_label(
-                text,
-                ai_reply,
-                conversation_data,
-                old_label=old_lead_label,
-            )
+                    # Re-ask if still in asked_yes_no (handle_yes_no_response left it there,
+                    # meaning suggestion_count was < 2 before this turn)
+                    re_ask: str = ""
+                    if meeting_state["step"] == "asked_yes_no":
+                        meeting_state["suggestion_count"] = meeting_state.get("suggestion_count", 1) + 1
+                        re_ask = (
+                            "Just checking — would you like to schedule a meeting or "
+                            "consultation with our team? Please reply *Yes* or *No*."
+                            "\n\nType *NO* at any time to stop the booking and return to normal chat."
+                        )
+                    set_meeting_state(conversation_data, meeting_state)
+
+                    messages_to_send = []
+                    if session_greeting:
+                        messages_to_send.append(session_greeting)
+                    messages_to_send.append(ai_reply)
+                    if re_ask:
+                        messages_to_send.append(re_ask)
+
+            # ── Normal AI path (idle / suppressed / scheduler off) ─────────
+            else:
+                ai_reply, _, session_greeting = await generate_bot_reply(
+                    text, conversation_data
+                )
+                lead_label = await classify_knowledge_lead_label(
+                    text, ai_reply, conversation_data, old_label=old_lead_label
+                )
+
+                meeting_suggestion: str = ""
+                if (
+                    scheduler_enabled
+                    and meeting_state
+                    and not is_suppressed_for_session(meeting_state)
+                    and lead_label in ("high intent", "hot lead")
+                    and meeting_state.get("suggestion_count", 0) == 0
+                ):
+                    meeting_state["step"] = "asked_yes_no"
+                    meeting_state["suggestion_count"] = 1
+                    meeting_suggestion = (
+                        "Would you like to schedule a meeting or consultation with our team? "
+                        "Please reply *Yes* or *No*."
+                        "\n\nType *NO* at any time to stop the booking and return to normal chat."
+                    )
+                    set_meeting_state(conversation_data, meeting_state)
+
+                messages_to_send = []
+                if session_greeting:
+                    messages_to_send.append(session_greeting)
+                messages_to_send.append(ai_reply)
+                if meeting_suggestion:
+                    messages_to_send.append(meeting_suggestion)
+
+            lead_label = lead_label if isinstance(lead_label, str) and lead_label.strip() else "general"
+
         else:
+            # Flow AI path — lead label from flow state
             lead_label = get_flow_lead_label(updated_flow_state or flow_state, flow_builder)
-        
+            messages_to_send = [ai_reply]
+
+        # ── Persist primary reply in conversation array ────────────────────
         if conversation_data and isinstance(conversation_data[-1], dict):
             conversation_data[-1]["response"] = ai_reply
 
-        # Save confirmed details when the flow completes
+        # ── Save flow confirmation if just completed ───────────────────────
         if flow_enabled and record_id and isinstance(updated_flow_state, dict) and updated_flow_state.get("completed"):
             try:
                 confirmation_payload = build_flow_confirmation_details(flow_builder, updated_flow_state)
@@ -219,38 +304,32 @@ async def _generate_response_and_update(
                         "conversation_id": record_id,
                         "sender": sender,
                         "details": confirmation_payload,
-                        "confirmed_at": datetime.datetime.utcnow().isoformat(),
+                        "confirmed_at": _now_iso(),
                     },
                     on_conflict="conversation_id",
                 ).execute()
             except Exception:
-                logger.exception("Failed to persist flow confirmation for conversation_id=%s", record_id)
+                logger.exception(
+                    "Failed to persist flow confirmation for conversation_id=%s", record_id
+                )
 
-        # Update database with response
+        # ── Update conversation in database ───────────────────────────────
+        update_payload = {
+            "conversation": conversation_data,
+            "updated_at": _now_iso(),
+            "lead_label": lead_label,
+        }
         if record_id:
-            db_client.table("whatsapp_conversations").update(
-                {
-                    "conversation": conversation_data,
-                    "updated_at": datetime.datetime.utcnow().isoformat(),
-                    "lead_label": lead_label,
-                }
-            ).eq("id", record_id).execute()
+            db_client.table("whatsapp_conversations").update(update_payload).eq(
+                "id", record_id
+            ).execute()
         else:
-            db_client.table("whatsapp_conversations").update(
-                {
-                    "conversation": conversation_data,
-                    "updated_at": datetime.datetime.utcnow().isoformat(),
-                    "lead_label": lead_label,
-                }
-            ).eq("sender", sender).execute()
+            db_client.table("whatsapp_conversations").update(update_payload).eq(
+                "sender", sender
+            ).execute()
 
-        # Send WhatsApp response
-        try:
-            meta_response = send_whatsapp_text(sender, ai_reply)
-            if meta_response.status_code >= 400:
-                logger.error("Meta send error %s: %s", meta_response.status_code, meta_response.text)
-        except Exception:
-            logger.exception("Meta send failure for sender=%s", sender)
+        # ── Send all WhatsApp messages ─────────────────────────────────────
+        _send_messages(sender, messages_to_send)
 
     except Exception:
         logger.exception("Background response generation failed for sender=%s", sender)
@@ -406,6 +485,13 @@ async def process_message(data: Any) -> None:
                 previous_flow_state = previous_entry.get("flow_state")
                 if isinstance(previous_flow_state, dict):
                     message_entry["flow_state"] = copy.deepcopy(previous_flow_state)
+
+        # Carry forward meeting_state across turns so the booking flow survives
+        # across multiple messages (same pattern as flow_state above)
+        if conversation_data:
+            prev_meeting_state = conversation_data[-1].get("meeting_state")
+            if isinstance(prev_meeting_state, dict):
+                message_entry["meeting_state"] = copy.deepcopy(prev_meeting_state)
 
         conversation_data.append(message_entry)
 
