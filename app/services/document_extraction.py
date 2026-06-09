@@ -9,6 +9,7 @@ from typing import Any
 
 from docx import Document
 from fastapi import HTTPException, UploadFile
+from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 from unstructured_client import UnstructuredClient  # type: ignore[import]
 from unstructured_client.models.operations.partition import PartitionRequestTypedDict  # type: ignore[import]
 from unstructured_client.models.shared.partition_parameters import PartitionParametersTypedDict  # type: ignore[import]
@@ -119,6 +120,12 @@ def _extract_locally(extension: str, data: bytes) -> str:
     return _decode_text_bytes(data)
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_not_exception_type(HTTPException),
+    reraise=True,
+)
 async def _extract_with_unstructured(data: bytes, filename: str, content_type: str | None) -> str:
     client = UnstructuredClient(
         api_key_auth=settings.unstructured_api_key,
@@ -126,14 +133,16 @@ async def _extract_with_unstructured(data: bytes, filename: str, content_type: s
     )
     file_content_type = content_type or _guess_content_type(filename, _extension_for_filename(filename))
     request: PartitionRequestTypedDict = {
-        "partition_parameters": {
+        "partition_parameters": {  # type: ignore[typeddict-item]
             "files": [
                 {
                     "file_name": filename,
                     "data": data,
                     "content_type": file_content_type,
                 }
-            ]
+            ],
+            "strategy": "hi_res",
+            "split_pdf_page": True,
         }
     }
 

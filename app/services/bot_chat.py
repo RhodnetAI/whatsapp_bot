@@ -4,6 +4,7 @@ from typing import Any
 
 from app.db.supabase_client import first_row, supabase, supabase_admin
 from app.services.ai import generate_ai_reply
+from app.services.vectorizer import search_knowledge_chunks
 
 logger = logging.getLogger("whatsapp")
 
@@ -22,6 +23,7 @@ _PROMPT_CONFIG_KEYS = (
     "links_references_prompt",
     "contact_info_prompt",
     "products_services_prompt",
+    "knowledge_context_prompt",
 )
 
 _PRODUCTS_SERVICES_TABLE = "information_bot_products_services"
@@ -78,7 +80,7 @@ async def get_active_bot() -> dict[str, Any]:
         .select(
             "is_selected, bot_name, greeting, summarized_instruction, "
             "company_info_enabled, company_address, company_phone, company_email, social_handles, "
-            "products_services_enabled"
+            "products_services_enabled, knowledge_enabled, enhanced_retrieval_enabled"
         )
         .eq("id", SINGLETON_ID)
         .limit(1)
@@ -105,19 +107,19 @@ async def get_active_bot() -> dict[str, Any]:
 
     social_handles = row.get("social_handles") if bot_table == "information_bot" else None
 
+    is_info = bot_table == "information_bot"
     return {
         "bot_table": bot_table,
         "bot_name": row.get("bot_name") or "",
         "greeting": row.get("greeting") or "",
         "summarized_instruction": row.get("summarized_instruction") or "",
-        # Information Agent only — used to conditionally inject the Company
-        # Info / Products & Services sections into the prompt (see
-        # _build_company_info_section / _build_products_services_section).
-        "company_info_enabled": bot_table == "information_bot" and bool(row.get("company_info_enabled")),
-        "products_services_enabled": bot_table == "information_bot" and bool(row.get("products_services_enabled")),
-        "company_address": row.get("company_address") or "" if bot_table == "information_bot" else "",
-        "company_phone": row.get("company_phone") or "" if bot_table == "information_bot" else "",
-        "company_email": row.get("company_email") or "" if bot_table == "information_bot" else "",
+        "company_info_enabled": is_info and bool(row.get("company_info_enabled")),
+        "products_services_enabled": is_info and bool(row.get("products_services_enabled")),
+        "knowledge_enabled": is_info and bool(row.get("knowledge_enabled")),
+        "enhanced_retrieval_enabled": is_info and bool(row.get("enhanced_retrieval_enabled")),
+        "company_address": row.get("company_address") or "" if is_info else "",
+        "company_phone": row.get("company_phone") or "" if is_info else "",
+        "company_email": row.get("company_email") or "" if is_info else "",
         "social_handles": social_handles if isinstance(social_handles, list) else [],
     }
 
@@ -263,6 +265,25 @@ def _build_products_services_section(prompt_config: dict[str, str], rows: list[d
     return prompt + "\n\n" + "\n\n".join(items)
 
 
+def _build_knowledge_context_section(chunks: list[dict[str, Any]], prompt_config: dict[str, str]) -> str:
+    """Format retrieved knowledge chunks as a system-prompt section, framed by
+    the knowledge_context_prompt loaded from app_config."""
+    context_prompt = prompt_config.get("knowledge_context_prompt", "").strip()
+    if not context_prompt:
+        return ""
+    items: list[str] = []
+    for i, chunk in enumerate(chunks, start=1):
+        chunk_text = (chunk.get("chunk") or "").strip()
+        if not chunk_text:
+            continue
+        source = chunk.get("original_name") or ""
+        header = f"Excerpt {i}" + (f" from {source}" if source else "")
+        items.append(f"{header}:\n{chunk_text}")
+    if not items:
+        return context_prompt
+    return context_prompt + "\n\n" + "\n\n".join(items)
+
+
 def build_messages(
     summarized_instruction: str,
     prompt_config: dict[str, str],
@@ -279,9 +300,9 @@ def build_messages(
     system_sections = [
         section
         for section in (
-            summarized_instruction.strip(),
-            prompt_config.get("answering_guidelines", "").strip(),
             prompt_config.get("response_format_rules", "").strip(),
+            prompt_config.get("answering_guidelines", "").strip(),
+            summarized_instruction.strip(),
             *(extra_sections or []),
         )
         if section
@@ -327,9 +348,8 @@ async def generate_bot_reply(
     prompt_config = await _fetch_prompt_config()
     summarized_instruction = bot["summarized_instruction"] or f"You are {bot['bot_name'] or 'a helpful assistant'}."
 
-    # Information Agent only: inject the Company Info (Contact Details +
-    # Links/References) and Products & Services sections, each gated strictly
-    # on its own enabled toggle from the active information_bot row.
+    # Information Agent only: inject enabled sections into the prompt in spec order:
+    # Company Info → Products & Services → Retrieved Knowledge Context.
     extra_sections: list[str] = []
     if bot["bot_table"] == "information_bot":
         if bot["company_info_enabled"]:
@@ -339,6 +359,16 @@ async def generate_bot_reply(
         if bot["products_services_enabled"]:
             rows = await _fetch_products_services_rows()
             section = _build_products_services_section(prompt_config, rows)
+            if section:
+                extra_sections.append(section)
+        if bot["knowledge_enabled"]:
+            top_k = 10 if bot["enhanced_retrieval_enabled"] else 4
+            chunks = await search_knowledge_chunks(
+                user_message,
+                top_k=top_k,
+                enhanced=bool(bot["enhanced_retrieval_enabled"]),
+            )
+            section = _build_knowledge_context_section(chunks, prompt_config)
             if section:
                 extra_sections.append(section)
 

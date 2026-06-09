@@ -9,6 +9,7 @@ from app.models.schemas import (
     BotIdentityUpdate,
     BotSelectRequest,
     CompanyInfoUpdate,
+    EnhancedRetrievalUpdate,
     FlowConfigUpdate,
     InstructionsUpdate,
     SectionToggleRequest,
@@ -99,6 +100,10 @@ async def get_settings(token: dict = Depends(verify_token)):
     if not flow or not flow.get("questions"):
         flow = None
 
+    enhanced_retrieval_enabled = (
+        bool(row.get("enhanced_retrieval_enabled")) if table == "information_bot" else False
+    )
+
     return SettingsResponse(
         active_bot=table,
         bot_name=row.get("bot_name"),
@@ -112,6 +117,7 @@ async def get_settings(token: dict = Depends(verify_token)):
         social_handles=row.get("social_handles") or [],
         flow_builder=flow,
         section_states=section_states,
+        enhanced_retrieval_enabled=enhanced_retrieval_enabled,
         setup_completed=True,
     )
 
@@ -236,5 +242,16 @@ async def update_flow(
             "flow_builder": config_dict,
             "flow_creation_enabled": flow_has_questions,
         }
+    ).eq("id", SINGLETON_ID).execute()
+    return {"ok": True}
+
+
+@router.put("/knowledge/enhanced-retrieval")
+async def update_enhanced_retrieval(
+    payload: EnhancedRetrievalUpdate,
+    token: dict = Depends(verify_token),
+):
+    _db().table("information_bot").update(
+        {"enhanced_retrieval_enabled": payload.enabled}
     ).eq("id", SINGLETON_ID).execute()
     return {"ok": True}

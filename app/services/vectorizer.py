@@ -1,14 +1,18 @@
 import asyncio
 import json
+import logging
 import math
 import os
 import uuid
 from pathlib import Path
 from typing import Any
 
+import httpx
 from openai import OpenAI
 
 from app.core.config import settings
+
+logger = logging.getLogger("whatsapp")
 
 try:
     from qdrant_client import AsyncQdrantClient  # type: ignore[import]
@@ -29,7 +33,6 @@ OPENAI_EMBEDDING_MODEL = settings.openai_embedding_model
 OPENAI_EMBEDDING_DIM = settings.openai_embedding_dim
 CHUNK_SIZE = int(os.getenv("EMBEDDING_CHUNK_SIZE", "800"))
 CHUNK_OVERLAP = int(os.getenv("EMBEDDING_CHUNK_OVERLAP", "100"))
-MAX_CHUNKS = int(os.getenv("MAX_EMBEDDING_CHUNKS", "20"))
 QDRANT_COLLECTION = settings.qdrant_collection or "agent_chunks_v2"
 QDRANT_VECTOR_NAME = "dense"
 
@@ -85,11 +88,9 @@ def _split_text_into_chunks(text: str) -> list[str]:
             separators=["\n\n", "\n", ".", " ", ""],
         )
 
-        markdown_chunks = markdown_splitter.split_text(normalized)
-        if len(markdown_chunks) > MAX_CHUNKS:
-            return recursive_splitter.split_text(normalized)[:MAX_CHUNKS]
-
-        return [chunk.page_content for chunk in markdown_chunks[:MAX_CHUNKS]]
+        markdown_docs = markdown_splitter.split_text(normalized)
+        chunks = recursive_splitter.split_documents(markdown_docs)
+        return [chunk.page_content for chunk in chunks if chunk.page_content.strip()]
 
     paragraphs = [paragraph.strip() for paragraph in normalized.split("\n\n") if paragraph.strip()]
     chunks: list[str] = []
@@ -118,7 +119,7 @@ def _split_text_into_chunks(text: str) -> list[str]:
     if current:
         append_chunk(current)
 
-    return chunks[:MAX_CHUNKS]
+    return chunks
 
 
 async def _create_embeddings(texts: list[str]) -> list[list[float]]:
@@ -186,6 +187,7 @@ async def _get_qdrant_client() -> Any:
     client_kwargs: dict[str, Any] = {
         "url": settings.qdrant_url,
         "api_key": settings.qdrant_api_key,
+        "cloud_inference": True,  # Enables BM25 sparse + dense embedding via Qdrant Cloud Inference
     }
     if settings.qdrant_grpc_port:
         client_kwargs["grpc_port"] = settings.qdrant_grpc_port
@@ -200,15 +202,26 @@ async def _ensure_qdrant_collection(client: Any) -> None:
 
     exists = await client.collection_exists(collection_name=QDRANT_COLLECTION)
     if not exists:
-        await client.create_collection(
-            collection_name=QDRANT_COLLECTION,
-            vectors_config={
+        try:
+            sparse_cfg = {
+                "sparse": qmodels.SparseVectorParams(
+                    index=qmodels.SparseIndexParams(on_disk=False)
+                )
+            }
+        except AttributeError:
+            sparse_cfg = None
+        create_kwargs: dict[str, Any] = {
+            "collection_name": QDRANT_COLLECTION,
+            "vectors_config": {
                 QDRANT_VECTOR_NAME: qmodels.VectorParams(
                     size=OPENAI_EMBEDDING_DIM,
                     distance=qmodels.Distance.COSINE,
                 )
             },
-        )
+        }
+        if sparse_cfg:
+            create_kwargs["sparse_vectors_config"] = sparse_cfg
+        await client.create_collection(**create_kwargs)
 
     await client.create_payload_index(
         collection_name=QDRANT_COLLECTION,
@@ -421,10 +434,7 @@ async def search_vectors(query: str, top_k: int = 4) -> list[dict[str, Any]]:
                 if result.payload
             ]
         except Exception as e:
-            # Fallback to local search if Qdrant fails
-            import logging
-            logging.getLogger("whatsapp").exception(f"Qdrant search failed: {e}")
-            pass
+            logger.exception("Qdrant search failed: %s", e)
 
     items = _load_vector_store()
     scored: list[tuple[float, dict[str, Any]]] = []
@@ -437,3 +447,96 @@ async def search_vectors(query: str, top_k: int = 4) -> list[dict[str, Any]]:
 
     scored.sort(key=lambda entry: entry[0], reverse=True)
     return [item for _, item in scored[:top_k]]
+
+
+async def search_knowledge_chunks(
+    query: str,
+    top_k: int = 4,
+    enhanced: bool = False,
+) -> list[dict[str, Any]]:
+    """Knowledge retrieval for the Information Bot.
+
+    enhanced=False: standard dense-only vector search (existing search_vectors path).
+    enhanced=True:  hybrid BM25-sparse + dense with RRF fusion via Qdrant Cloud
+                    Inference, followed by VoyageAI rerank-2.5 to surface the top
+                    results — mirrors the inteliz-labs-backend approach exactly.
+    Falls back to dense-only search at every failure point so the bot always gets
+    some context rather than nothing.
+    """
+    if not enhanced:
+        return await search_vectors(query, top_k=top_k)
+
+    client = await _get_qdrant_client()
+    if client is None or qmodels is None:
+        return await search_vectors(query, top_k=top_k)
+
+    await _ensure_qdrant_collection(client)
+    k_candidates = max(top_k * 2, 10)
+
+    # Hybrid search: dense (OpenAI via Cloud Inference) + BM25 sparse (qdrant/bm25
+    # via Cloud Inference) fused with Reciprocal Rank Fusion.
+    try:
+        results = await client.query_points(
+            collection_name=QDRANT_COLLECTION,
+            prefetch=[
+                qmodels.Prefetch(
+                    query=qmodels.Document(
+                        text=query,
+                        model=f"openai/{OPENAI_EMBEDDING_MODEL}",
+                        options={"openai-api-key": settings.openai_api_key},
+                    ),
+                    using=QDRANT_VECTOR_NAME,
+                    limit=k_candidates,
+                ),
+                qmodels.Prefetch(
+                    query=qmodels.Document(text=query, model="qdrant/bm25"),
+                    using="sparse",
+                    limit=k_candidates,
+                ),
+            ],
+            query=qmodels.FusionQuery(fusion=qmodels.Fusion.RRF),
+            limit=k_candidates,
+            with_payload=True,
+            with_vectors=False,
+        )
+        raw_results = [
+            {**(point.payload or {}), "score": float(point.score or 0.0)}
+            for point in (results.points or [])
+            if (point.payload or {}).get("chunk")
+        ]
+    except Exception:
+        logger.warning("Hybrid search failed, falling back to dense-only search")
+        return await search_vectors(query, top_k=top_k)
+
+    if not raw_results:
+        return []
+
+    voyage_key = (settings.voyage_api_key or "").strip()
+    if not voyage_key or len(raw_results) <= 3:
+        return raw_results[:top_k]
+
+    # VoyageAI reranking: POST to /v1/rerank, pick top_k by returned index order.
+    docs = [r.get("chunk", "") for r in raw_results]
+    try:
+        async with httpx.AsyncClient() as http_client:
+            resp = await http_client.post(
+                "https://api.voyageai.com/v1/rerank",
+                headers={
+                    "Authorization": f"Bearer {voyage_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "query": query,
+                    "documents": docs,
+                    "model": "rerank-2.5",
+                    "top_k": min(top_k, len(docs)),
+                },
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+            rerank_data = resp.json()
+        reranked = [raw_results[item["index"]] for item in rerank_data.get("data", [])]
+        return reranked if reranked else raw_results[:top_k]
+    except Exception:
+        logger.warning("VoyageAI reranking failed, returning top results by Qdrant score")
+        return raw_results[:top_k]

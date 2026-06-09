@@ -251,6 +251,10 @@ class SchedulerSaveResponse(BaseModel):
     item: SchedulerItem
 
 
+class EnhancedRetrievalUpdate(BaseModel):
+    enabled: bool
+
+
 class SettingsResponse(BaseModel):
     active_bot: str = "information_bot"
     bot_name: str | None = None
@@ -264,4 +268,5 @@ class SettingsResponse(BaseModel):
     social_handles: list[dict] = []
     flow_builder: Optional[PipelineConfig] = None
     section_states: dict = {}
+    enhanced_retrieval_enabled: bool = False
     setup_completed: bool = False
