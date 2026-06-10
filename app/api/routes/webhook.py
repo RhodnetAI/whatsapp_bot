@@ -20,7 +20,6 @@ from app.services.flow_ai import (
 from app.services.rag import classify_knowledge_lead_label
 from app.services.meeting_booking import (
     BOOKING_FLOW_STEPS,
-    build_conversation_summary,
     get_meeting_state,
     handle_yes_no_response,
     is_suppressed_for_session,
@@ -82,6 +81,7 @@ async def _generate_response_and_update(
     record_id: str | None,
     conversation_data: list[dict[str, Any]],
     old_lead_label: str,
+    message_id: str | None = None,
 ) -> None:
     """Background task: generate AI response (flow or knowledge) and update conversation asynchronously."""
     db_client = _conversation_client()
@@ -184,6 +184,14 @@ async def _generate_response_and_update(
                 messages_to_send = [ai_reply]
 
                 if is_complete and booking_data:
+                    # Show typing indicator while we create the calendar event,
+                    # send emails, and prepare the confirmation messages below.
+                    if isinstance(message_id, str) and message_id:
+                        try:
+                            send_whatsapp_typing_indicator(message_id)
+                        except Exception:
+                            logger.exception("Failed to send typing indicator for sender=%s", sender)
+
                     try:
                         slot_date = booking_data["slot_date"]
                         slot_start = booking_data["slot_start"]
@@ -194,7 +202,7 @@ async def _generate_response_and_update(
                         slot_end = booking_data.get("slot_end", "")
                         end_mins = int(slot_end.split(":")[0]) * 60 + int(slot_end.split(":")[1]) if slot_end else start_mins + 30
                         duration = max(30, end_mins - start_mins)
-                        summary = build_conversation_summary(conversation_data)
+                        purpose = booking_data.get("purpose") or "Not specified"
 
                         # Build attendees list from user + admin emails
                         attendees: list[str] = [booking_data["user_email"]]
@@ -204,7 +212,7 @@ async def _generate_response_and_update(
                         description = (
                             f"Booked via WhatsApp for {booking_data['user_name']} "
                             f"({booking_data['user_email']}).\n\n"
-                            f"Conversation context:\n{summary}"
+                            f"Purpose: {purpose}"
                         )
 
                         logger.info(
@@ -225,7 +233,7 @@ async def _generate_response_and_update(
                         )
 
                         save_booking(
-                            sender, booking_data, meet_link, summary,
+                            sender, booking_data, meet_link, purpose,
                             calendar_event_id=calendar_event_id,
                             calendar_event_link=calendar_event_link,
                         )
@@ -238,7 +246,7 @@ async def _generate_response_and_update(
                             meeting_datetime=meeting_dt,
                             duration_minutes=duration,
                             meet_link=meet_link,
-                            summary=summary,
+                            purpose=purpose,
                             calendar_event_link=calendar_event_link,
                         )
                         logger.info("Confirmation email completed for sender=%s", sender)
@@ -250,7 +258,7 @@ async def _generate_response_and_update(
                             meeting_datetime=meeting_dt,
                             duration_minutes=duration,
                             meet_link=meet_link,
-                            summary=summary,
+                            purpose=purpose,
                             calendar_event_link=calendar_event_link,
                         )
                         messages_to_send.append(whatsapp_summary)
@@ -590,4 +598,4 @@ async def process_message(data: Any) -> None:
 
     # Spawn background task to generate response and update database
     # This allows the webhook to return immediately (within 3 seconds per WhatsApp spec)
-    asyncio.create_task(_generate_response_and_update(sender, text, record_id, conversation_data, initial_lead_label))
+    asyncio.create_task(_generate_response_and_update(sender, text, record_id, conversation_data, initial_lead_label, message_id))

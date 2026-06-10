@@ -36,9 +36,11 @@ class Settings:
     admin_username: str
     admin_password: str
     gmail_user: str
-    gmail_app_password: str
+    gmail_client_id: str
+    gmail_client_secret: str
+    gmail_refresh_token: str
     admin_email: str
-    google_service_account_file: str
+    google_service_account_json: str
     google_calendar_id: str
     google_calendar_timezone: str
 
@@ -64,9 +66,11 @@ settings = Settings(
     admin_username=_required_env("ADMIN_USERNAME"),
     admin_password=_required_env("ADMIN_PASSWORD"),
     gmail_user=os.getenv("GMAIL_USER", ""),
-    gmail_app_password=os.getenv("GMAIL_APP_PASSWORD", ""),
+    gmail_client_id=os.getenv("GMAIL_CLIENT_ID", ""),
+    gmail_client_secret=os.getenv("GMAIL_CLIENT_SECRET", ""),
+    gmail_refresh_token=os.getenv("GMAIL_REFRESH_TOKEN", ""),
     admin_email=os.getenv("ADMIN_EMAIL", ""),
-    google_service_account_file=os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", ""),
+    google_service_account_json=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
     google_calendar_id=os.getenv("GOOGLE_CALENDAR_ID", "primary"),
     google_calendar_timezone=os.getenv("GOOGLE_CALENDAR_TIMEZONE", "UTC"),
 )

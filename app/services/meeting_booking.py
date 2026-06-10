@@ -12,6 +12,7 @@ asked_yes_no  – bot asked "Would you like to schedule?" and is waiting
 showing_slots – bot displayed available slots, waiting for selection
 asked_name    – slot chosen, waiting for user's name
 asked_email   – name collected, waiting for email address
+asked_purpose – email collected, waiting for meeting purpose
 verification  – all details collected, showing summary and asking to confirm
 completed     – booking saved and confirmed
 declined      – user said No (suppressed for the rest of the day)
@@ -27,7 +28,7 @@ from app.db.supabase_client import first_row, supabase, supabase_admin
 logger = logging.getLogger("whatsapp")
 
 # Booking steps that are inside the strict booking flow (no normal AI reply)
-BOOKING_FLOW_STEPS = {"showing_slots", "asked_name", "asked_email", "verification"}
+BOOKING_FLOW_STEPS = {"showing_slots", "asked_name", "asked_email", "asked_purpose", "verification"}
 
 # Steps where the scheduler is inactive for the session
 SUPPRESSED_STEPS = {"declined", "completed"}
@@ -55,6 +56,7 @@ def _empty_state() -> dict[str, Any]:
             "slot_end": None,
             "user_name": None,
             "user_email": None,
+            "purpose": None,
         },
         "shown_slots": [],
     }
@@ -433,6 +435,7 @@ def _build_verification_message(partial: dict[str, Any]) -> str:
     slot_end = partial.get("slot_end", "—")
     user_name = partial.get("user_name", "—")
     user_email = partial.get("user_email", "—")
+    purpose = partial.get("purpose", "—")
 
     try:
         d = datetime.date.fromisoformat(str(slot_date))
@@ -445,29 +448,12 @@ def _build_verification_message(partial: dict[str, Any]) -> str:
         f"📅 Date:  {date_label}\n"
         f"⏰ Time:  {slot_start} – {slot_end}\n"
         f"👤 Name:  {user_name}\n"
-        f"📧 Email: {user_email}\n\n"
+        f"📧 Email: {user_email}\n"
+        f"📝 Purpose: {purpose}\n\n"
         "Please reply *Confirm* to proceed."
         f"{_NO_FOOTER}"
     )
     return msg
-
-
-
-def build_conversation_summary(conversation_data: list[dict[str, Any]], max_turns: int = 6) -> str:
-    """Extract the last few conversation turns as a brief context summary."""
-    entries = [e for e in conversation_data if isinstance(e, dict)]
-    recent = entries[-max_turns:] if len(entries) > max_turns else entries
-    lines = []
-    for e in recent:
-        q = (e.get("query") or "").strip()
-        r = (e.get("response") or "").strip()
-        if q:
-            lines.append(f"User: {q}")
-        if r:
-            # Truncate very long bot replies in summary
-            snippet = r[:200] + "…" if len(r) > 200 else r
-            lines.append(f"Bot: {snippet}")
-    return "\n".join(lines) if lines else "No conversation context available."
 
 
 # ── Booking persistence ───────────────────────────────────────────────────────
@@ -476,7 +462,7 @@ def save_booking(
     sender: str,
     partial: dict[str, Any],
     meet_link: str,
-    summary: str,
+    purpose: str,
     calendar_event_id: str = "",
     calendar_event_link: str = "",
 ) -> str | None:
@@ -501,7 +487,7 @@ def save_booking(
             "meeting_datetime": meeting_dt.isoformat(),
             "duration_minutes": duration,
             "meet_link": meet_link,
-            "conversation_summary": summary,
+            "purpose": purpose,
         }
         if calendar_event_id:
             row["calendar_event_id"] = calendar_event_id
@@ -618,6 +604,26 @@ def process_meeting_step(
                 None,
             )
         partial["user_email"] = text
+        state["partial"] = partial
+        state["step"] = "asked_purpose"
+        return (
+            "What is the purpose of this meeting? Please describe briefly.\n"
+            "For example: Product demo, General inquiry, Support discussion" + _NO_FOOTER,
+            state,
+            False,
+            None,
+        )
+
+    # ── asked_purpose ─────────────────────────────────────────────────────────
+    if step == "asked_purpose":
+        if len(text) < 2 or len(text) > 300:
+            return (
+                "Please briefly describe the purpose of the meeting (2–300 characters)." + _NO_FOOTER,
+                state,
+                False,
+                None,
+            )
+        partial["purpose"] = text
         state["partial"] = partial
         state["step"] = "verification"
         return (
