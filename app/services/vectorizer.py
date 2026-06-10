@@ -89,8 +89,8 @@ def _split_text_into_chunks(text: str) -> list[str]:
         )
 
         markdown_docs = markdown_splitter.split_text(normalized)
-        chunks = recursive_splitter.split_documents(markdown_docs)
-        return [chunk.page_content for chunk in chunks if chunk.page_content.strip()]
+        doc_chunks = recursive_splitter.split_documents(markdown_docs)
+        return [chunk.page_content for chunk in doc_chunks if chunk.page_content.strip()]
 
     paragraphs = [paragraph.strip() for paragraph in normalized.split("\n\n") if paragraph.strip()]
     chunks: list[str] = []

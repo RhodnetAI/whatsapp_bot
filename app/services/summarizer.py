@@ -85,8 +85,8 @@ async def generate_summarized_instruction(raw_text: str) -> str:
             temperature=0.2,
             instructions=system_prompt,
             input=raw_text,
-            reasoning_effort="minimal",
-            verbosity="low",
+            reasoning={"effort": "minimal"},
+            text={"verbosity": "low"},
         )
         content = response.output_text
         return content.strip() if isinstance(content, str) else raw_text

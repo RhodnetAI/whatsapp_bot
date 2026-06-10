@@ -21,7 +21,7 @@ declined      – user said No (suppressed for the rest of the day)
 import datetime
 import logging
 import re
-from typing import Any
+from typing import Any, cast
 
 from app.db.supabase_client import first_row, supabase, supabase_admin
 
@@ -163,8 +163,8 @@ def _is_slot_booked(date_str: str, slot_start: str, slot_end: str) -> bool:
             if not bdt:
                 continue
             try:
-                b_start = datetime.datetime.fromisoformat(bdt)
-                b_end = b_start + datetime.timedelta(minutes=int(bdur))
+                b_start = datetime.datetime.fromisoformat(cast(str, bdt))
+                b_end = b_start + datetime.timedelta(minutes=int(cast(Any, bdur)))
                 if b_start < end_dt and b_end > start_dt:
                     return True
             except Exception:
@@ -208,10 +208,10 @@ def get_available_slots(days_ahead: int = 7) -> list[dict[str, str]]:
 
         for row in matching:
             slots = _generate_30min_slots(
-                start=row.get("time_start", "09:00"),
-                end=row.get("time_end", "17:00"),
-                exclude_start=row.get("exclude_time_start", ""),
-                exclude_end=row.get("exclude_time_end", ""),
+                start=cast(str, row.get("time_start", "09:00")),
+                end=cast(str, row.get("time_end", "17:00")),
+                exclude_start=cast(str, row.get("exclude_time_start", "")),
+                exclude_end=cast(str, row.get("exclude_time_end", "")),
             )
             for s_start, s_end in slots:
                 if not _is_slot_booked(date_str, s_start, s_end):

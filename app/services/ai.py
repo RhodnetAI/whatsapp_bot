@@ -1,6 +1,8 @@
 import asyncio
+from typing import cast
 
 from openai import OpenAI
+from openai.types.responses import ResponseInputParam
 
 from app.core.config import settings
 
@@ -18,9 +20,9 @@ async def generate_ai_reply(messages_for_ai: list[dict[str, str]]) -> str:
         response = await asyncio.to_thread(
             client.responses.create,
             model="gpt-5-nano-2025-08-07",
-            input=input_messages,
-            reasoning_effort="minimal",
-            verbosity="low",
+            input=cast(ResponseInputParam, input_messages),
+            reasoning={"effort": "minimal"},
+            text={"verbosity": "low"},
         )
         return (response.output_text or "").strip()
     except Exception:

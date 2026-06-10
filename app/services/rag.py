@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Callable, TypeVar
 
 from openai import OpenAI
+from pydantic import SecretStr
 from app.services.ai import generate_ai_reply
 from app.services.vectorizer import search_vectors
 from app.core.config import settings
@@ -219,7 +220,7 @@ async def classify_knowledge_lead_label(
 
     if ChatGroq and settings.groq_api_key.strip() != "":
         try:
-            groq = ChatGroq(model="llama-3.1-8b-instant", temperature=0, api_key=settings.groq_api_key)
+            groq = ChatGroq(model="llama-3.1-8b-instant", temperature=0, api_key=SecretStr(settings.groq_api_key))
             if HumanMessage and SystemMessage:
                 result = await groq.ainvoke(
                     [SystemMessage(content=_LEAD_LABEL_CLASSIFICATION_PROMPT), HumanMessage(content=history_block)]
@@ -255,7 +256,7 @@ async def _classify_and_rewrite_query(user_message: str, chat_history: Optional[
 
     if ChatGroq and settings.groq_api_key.strip() != "":
         try:
-            groq = ChatGroq(model="llama-3.1-8b-instant", temperature=0, api_key=settings.groq_api_key)
+            groq = ChatGroq(model="llama-3.1-8b-instant", temperature=0, api_key=SecretStr(settings.groq_api_key))
             if HumanMessage and SystemMessage:
                 result = await groq.ainvoke(
                     [SystemMessage(content=_INTENT_COMBINED_SYSTEM_PROMPT), HumanMessage(content=human_content)]
@@ -277,8 +278,8 @@ async def _classify_and_rewrite_query(user_message: str, chat_history: Optional[
         model="gpt-5-nano-2025-08-07",
         instructions=_INTENT_COMBINED_SYSTEM_PROMPT,
         input=human_content,
-        reasoning_effort="minimal",
-        verbosity="low",
+        reasoning={"effort": "minimal"},
+        text={"verbosity": "low"},
     )
     content = response.output_text or ""
     payload = _sanitize_json(content)
