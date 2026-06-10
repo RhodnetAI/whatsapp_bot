@@ -158,11 +158,23 @@ async def update_bot_identity(
 async def _do_summarize(table: str, raw_text: str, current_hash: str | None) -> None:
     new_hash = hash_raw_instructions(raw_text)
     if new_hash == current_hash:
+        logger.info("[summarize] %s: instructions unchanged (hash=%s), skipping", table, new_hash)
         return
+
+    logger.info(
+        "[summarize] %s: instructions changed (old_hash=%s, new_hash=%s), starting summarization",
+        table, current_hash, new_hash,
+    )
     summarized = await generate_summarized_instruction(raw_text)
+    logger.info(
+        "[summarize] %s: summarization complete (raw_chars=%d, summary_chars=%d)",
+        table, len(raw_text), len(summarized),
+    )
+
     _db().table(table).update(
         {"summarized_instruction": summarized, "instruction_hash": new_hash}
     ).eq("id", SINGLETON_ID).execute()
+    logger.info("[summarize] %s: stored summarized_instruction and instruction_hash", table)
 
 
 @router.put("/instructions")
@@ -173,6 +185,7 @@ async def update_instructions(
     table = _get_active_bot_table()
     row = _get_row(table)
 
+    logger.info("[summarize] %s: saving instructions, dos and donts", table)
     _db().table(table).update(
         {
             "main_instruction": payload.main_instruction,
@@ -183,11 +196,13 @@ async def update_instructions(
 
     raw_text = build_raw_instructions(
         {
+            "bot_name": row.get("bot_name"),
             "main_instruction": payload.main_instruction,
             "dos": payload.dos,
             "donts": payload.donts,
         }
     )
+    logger.info("[summarize] %s: queuing background summarization task (raw_chars=%d)", table, len(raw_text))
     asyncio.create_task(_do_summarize(table, raw_text, row.get("instruction_hash")))
 
     return {"ok": True}
