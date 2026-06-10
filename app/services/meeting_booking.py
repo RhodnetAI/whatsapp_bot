@@ -494,7 +494,23 @@ def save_booking(
         if calendar_event_link:
             row["calendar_event_link"] = calendar_event_link
 
-        res = _db().table("meeting_bookings").insert(row).execute()
+        try:
+            res = _db().table("meeting_bookings").insert(row).execute()
+        except Exception as exc:
+            # The calendar_event_id/calendar_event_link columns may not exist yet
+            # in Supabase's schema cache (PGRST204). Retry without them so the
+            # booking is still saved.
+            if "calendar_event_id" in str(exc) or "calendar_event_link" in str(exc):
+                logger.warning(
+                    "calendar_event_id/calendar_event_link columns missing; "
+                    "retrying booking insert without them for sender=%s", sender,
+                )
+                row.pop("calendar_event_id", None)
+                row.pop("calendar_event_link", None)
+                res = _db().table("meeting_bookings").insert(row).execute()
+            else:
+                raise
+
         inserted = first_row(res)
         return inserted.get("id") if isinstance(inserted, dict) else None
     except Exception:

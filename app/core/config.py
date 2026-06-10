@@ -35,11 +35,10 @@ class Settings:
     supabase_service_role_key: str | None
     admin_username: str
     admin_password: str
-    gmail_user: str
-    gmail_client_id: str
-    gmail_client_secret: str
-    gmail_refresh_token: str
     admin_email: str
+    resend_api_key: str
+    resend_from_email: str
+    google_meet_link: str
     google_service_account_json: str
     google_calendar_id: str
     google_calendar_timezone: str
@@ -65,11 +64,10 @@ settings = Settings(
     supabase_service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY"),
     admin_username=_required_env("ADMIN_USERNAME"),
     admin_password=_required_env("ADMIN_PASSWORD"),
-    gmail_user=os.getenv("GMAIL_USER", ""),
-    gmail_client_id=os.getenv("GMAIL_CLIENT_ID", ""),
-    gmail_client_secret=os.getenv("GMAIL_CLIENT_SECRET", ""),
-    gmail_refresh_token=os.getenv("GMAIL_REFRESH_TOKEN", ""),
     admin_email=os.getenv("ADMIN_EMAIL", ""),
+    resend_api_key=os.getenv("RESEND_API_KEY", ""),
+    resend_from_email=os.getenv("RESEND_FROM_EMAIL", "onboarding@resend.dev"),
+    google_meet_link=os.getenv("GOOGLE_MEET_LINK", "https://meet.google.com/yry-mdbu-pju"),
     google_service_account_json=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
     google_calendar_id=os.getenv("GOOGLE_CALENDAR_ID", "primary"),
     google_calendar_timezone=os.getenv("GOOGLE_CALENDAR_TIMEZONE", "UTC"),

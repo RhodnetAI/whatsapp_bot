@@ -1,18 +1,10 @@
 import datetime
 import json
 import logging
-import random
-import string
 
 from app.core.config import settings
 
 logger = logging.getLogger("whatsapp")
-
-
-def _random_meet_code() -> str:
-    def segment(n: int) -> str:
-        return "".join(random.choices(string.ascii_lowercase, k=n))
-    return f"{segment(3)}-{segment(4)}-{segment(3)}"
 
 
 def _load_service_account() -> dict | None:
@@ -37,18 +29,16 @@ def create_meeting_event(
     attendees: list[str] | None = None,
     description: str = "",
 ) -> tuple[str, str, str]:
-    """Create a Google Calendar event and return a Meet link.
+    """Create a Google Calendar event embedding the static Meet link.
 
-    A Meet link is always generated locally (service accounts cannot create
-    real Google Meet conferences without domain-wide delegation), and is
+    The Meet link is a fixed value (configured via GOOGLE_MEET_LINK) and is
     embedded in the calendar event's description and location.
 
     Returns (meet_link, calendar_event_id, calendar_event_link).
     If the Calendar API call fails, calendar_event_id and calendar_event_link
     are empty strings but the Meet link is still returned.
     """
-    code = _random_meet_code()
-    meet_link = f"https://meet.google.com/{code}"
+    meet_link = settings.google_meet_link
 
     sa_info = _load_service_account()
     if sa_info is not None:
