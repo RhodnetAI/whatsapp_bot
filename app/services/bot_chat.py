@@ -357,25 +357,8 @@ async def generate_bot_reply(
     summarized_instruction = bot["summarized_instruction"] or f"You are {bot['bot_name'] or 'a helpful assistant'}."
 
     # Information Agent only: inject enabled sections into the prompt in spec order:
-    # Scheduler suppression → Company Info → Products & Services → Retrieved Knowledge Context.
+    # Company Info → Products & Services → Retrieved Knowledge Context.
     extra_sections: list[str] = []
-    if bot["bot_table"] == "information_bot" and not bot.get("scheduler_enabled"):
-        extra_sections.append(
-            "IMPORTANT RESTRICTION: Do NOT mention, suggest, or imply anything related to "
-            "scheduling, meetings, consultations, appointments, or bookings in any response. "
-            "Never ask the user if they want to book or schedule anything. "
-            "Answer only what the user asked without any scheduling-related call to action."
-        )
-    elif bot["bot_table"] == "information_bot" and bot.get("scheduler_enabled"):
-        extra_sections.append(
-            "MEETING / CONSULTATION SUGGESTIONS: Do not end your response with a "
-            "suggestion, offer, or question about scheduling a meeting, call, "
-            "consultation, or appointment unless the user explicitly asks about "
-            "booking, scheduling, or speaking with someone. A separate system "
-            "process decides when to invite the user to schedule a meeting based "
-            "on their intent — do not duplicate, anticipate, or repeat that "
-            "invitation in your reply."
-        )
     if bot["bot_table"] == "information_bot":
         if bot["company_info_enabled"]:
             section = _build_company_info_section(bot, prompt_config)

@@ -8,14 +8,18 @@ from fastapi import APIRouter, Request
 
 from app.core.config import settings
 from app.db.supabase_client import first_row, supabase, supabase_admin
-from app.services.bot_chat import generate_bot_reply
+from app.services.bot_chat import generate_bot_reply, is_first_message_of_session
 from app.services.whatsapp import send_whatsapp_text, send_whatsapp_typing_indicator
 from app.services.flow_ai import (
     should_use_flow,
     process_flow_message,
     get_flow_state,
+    set_flow_state,
+    fresh_flow_state,
+    get_run_mode,
     build_flow_confirmation_details,
     get_flow_lead_label,
+    RUN_MODE_ONCE_PER_USER,
 )
 from app.services.rag import classify_knowledge_lead_label
 from app.services.meeting_booking import (
@@ -89,10 +93,11 @@ async def _generate_response_and_update(
     try:
         # ── Load flow builder ──────────────────────────────────────────────
         flow_builder = None
+        flow_creation_enabled = False
         try:
             flow_res = (
-                supabase.table("service_agent_setup")
-                .select("flow_builder")
+                db_client.table("information_bot")
+                .select("flow_builder, flow_creation_enabled")
                 .eq("id", 1)
                 .limit(1)
                 .execute()
@@ -100,6 +105,7 @@ async def _generate_response_and_update(
             flow_row = first_row(flow_res) or {}
             if isinstance(flow_row, dict):
                 flow_builder = flow_row.get("flow_builder")
+                flow_creation_enabled = bool(flow_row.get("flow_creation_enabled"))
         except Exception:
             logger.exception("Failed to load flow builder state")
 
@@ -108,12 +114,22 @@ async def _generate_response_and_update(
         lead_label: str = old_lead_label or "general"
         messages_to_send: list[str] = []
 
-        flow_enabled = should_use_flow(flow_builder)
+        flow_enabled = should_use_flow(flow_builder, flow_creation_enabled)
         flow_state = get_flow_state(conversation_data)
+        run_mode = get_run_mode(flow_builder)
 
-        # Check if flow already completed (handles race conditions)
+        # "Every new session" run mode: if the flow was completed in a
+        # previous session, restart it for this new session.
+        if flow_enabled and run_mode != RUN_MODE_ONCE_PER_USER and flow_state.get("completed"):
+            prior_entries = conversation_data[:-1] if conversation_data else []
+            if is_first_message_of_session(prior_entries):
+                flow_state = fresh_flow_state()
+                set_flow_state(conversation_data, flow_state)
+
+        # "Once per user" run mode: check if flow already completed at any
+        # point in the past (handles race conditions too).
         flow_already_completed = False
-        if flow_enabled:
+        if flow_enabled and run_mode == RUN_MODE_ONCE_PER_USER:
             try:
                 completion_check = (
                     db_client.table("whatsapp_flow_confirmations")
@@ -507,10 +523,11 @@ async def process_message(data: Any) -> None:
 
         # Check if flow is enabled to initialize flow_state
         flow_builder = None
+        flow_creation_enabled = False
         try:
             flow_res = (
-                supabase.table("service_agent_setup")
-                .select("flow_builder")
+                db_client.table("information_bot")
+                .select("flow_builder, flow_creation_enabled")
                 .eq("id", 1)
                 .limit(1)
                 .execute()
@@ -518,6 +535,7 @@ async def process_message(data: Any) -> None:
             flow_row = first_row(flow_res) or {}
             if isinstance(flow_row, dict):
                 flow_builder = flow_row.get("flow_builder")
+                flow_creation_enabled = bool(flow_row.get("flow_creation_enabled"))
         except Exception:
             logger.exception("Failed to load flow builder state during message append")
 
@@ -525,12 +543,12 @@ async def process_message(data: Any) -> None:
         if initial_lead_label is None or initial_lead_label == "none":
             initial_lead_label = "general"
 
-        if should_use_flow(flow_builder):
+        if should_use_flow(flow_builder, flow_creation_enabled):
             if not conversation_data:
                 # First flow message in this conversation
                 message_entry["flow_state"] = {
                     "started": False,
-                    "current_question_index": 0,
+                    "current_question_id": None,
                     "answers": {},
                     "completed": False,
                 }

@@ -98,6 +98,7 @@ class PipelineConfig(BaseModel):
     greeting_message: str
     completion_message: str
     thank_you_message: str
+    run_mode: Literal["every_session", "once_per_user"] = "every_session"
     node_positions: Optional[dict[str, dict]] = None
     edge_handles: Optional[dict[str, dict]] = None
 
