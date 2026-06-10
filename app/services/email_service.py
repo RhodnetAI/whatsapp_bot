@@ -25,7 +25,8 @@ def build_booking_body(
 
     Used for the WhatsApp follow-up message.
     """
-    formatted_dt = meeting_datetime.strftime("%A, %B %d, %Y at %I:%M %p UTC")
+    date_label = meeting_datetime.strftime("%A, %B %d, %Y")
+    time_label = meeting_datetime.strftime("%I:%M %p")
     intro = (
         f"A meeting has been booked by {user_name}."
         if recipient_is_admin
@@ -38,7 +39,8 @@ def build_booking_body(
         "───────────────────────────────",
         f"Name:      {user_name}",
         f"Email:     {user_email}",
-        f"Date/Time: {formatted_dt}",
+        f"Date:      {date_label}",
+        f"Time:      {time_label}",
         f"Duration:  {duration_minutes} minutes",
         f"Meet Link: {meet_link}",
     ]
@@ -75,7 +77,8 @@ def _build_email_html(
     recipient_is_admin: bool = False,
 ) -> str:
     """Build an HTML confirmation email styled to match the website theme."""
-    formatted_dt = meeting_datetime.strftime("%A, %B %d, %Y at %I:%M %p UTC")
+    date_label = meeting_datetime.strftime("%A, %B %d, %Y")
+    time_label = meeting_datetime.strftime("%I:%M %p")
 
     if recipient_is_admin:
         intro = f"A new meeting has been booked by <strong>{html.escape(user_name)}</strong>."
@@ -85,7 +88,8 @@ def _build_email_html(
     rows = [
         _detail_row("Name", user_name),
         _detail_row("Email", user_email),
-        _detail_row("Date & Time", formatted_dt),
+        _detail_row("Date", date_label),
+        _detail_row("Time", time_label),
         _detail_row("Duration", f"{duration_minutes} minutes"),
     ]
 

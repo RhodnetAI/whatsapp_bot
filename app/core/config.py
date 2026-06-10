@@ -70,5 +70,5 @@ settings = Settings(
     google_meet_link=os.getenv("GOOGLE_MEET_LINK", "https://meet.google.com/yry-mdbu-pju"),
     google_service_account_json=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
     google_calendar_id=os.getenv("GOOGLE_CALENDAR_ID", "primary"),
-    google_calendar_timezone=os.getenv("GOOGLE_CALENDAR_TIMEZONE", "UTC"),
+    google_calendar_timezone=os.getenv("GOOGLE_CALENDAR_TIMEZONE", "Asia/Kolkata"),
 )
