@@ -202,3 +202,59 @@ def send_meeting_confirmation(
             logger.error("Admin notification email failed to send to %s", settings.admin_email)
     else:
         logger.warning("ADMIN_EMAIL not configured; skipping admin notification email")
+
+
+def _build_flow_completion_html(sender: str, questions: list[dict]) -> str:
+    """Build an HTML summary of a completed flow's responses for the admin."""
+    rows = "".join(
+        _detail_row(str(q.get("question") or "Question"), str(q.get("answer") or "—"))
+        for q in questions
+    )
+
+    return f"""<!DOCTYPE html>
+<html>
+  <body style="margin:0;padding:0;background-color:#f2f0f8;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f2f0f8;padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background-color:#ffffff;border:1px solid #d6d4df;border-radius:12px;overflow:hidden;">
+            <tr>
+              <td style="background-color:#5b38f0;padding:28px 32px;">
+                <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">Flow Completed</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px;">
+                <p style="margin:0 0 20px;color:#2b2b2b;font-size:15px;line-height:1.6;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">A user (<strong>{html.escape(sender)}</strong>) just completed the flow. Here are their responses:</p>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0edfe;border-radius:8px;">{rows}
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="background-color:#f2f0f8;padding:16px 32px;text-align:center;">
+                <p style="margin:0;color:#808080;font-size:12px;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">This is an automated notification from your WhatsApp bot.</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>"""
+
+
+def send_flow_completion_email(sender: str, questions: list[dict]) -> None:
+    """Notify the admin that a user completed the flow, with their answers."""
+    if not settings.resend_api_key:
+        logger.warning("RESEND_API_KEY not configured; skipping flow completion email")
+        return
+
+    if not settings.admin_email:
+        logger.warning("ADMIN_EMAIL not configured; skipping flow completion email")
+        return
+
+    body = _build_flow_completion_html(sender, questions)
+    if _send_email(settings.admin_email, "Flow Completed - New Responses", body):
+        logger.info("Flow completion email sent successfully to %s", settings.admin_email)
+    else:
+        logger.error("Flow completion email failed to send to %s", settings.admin_email)

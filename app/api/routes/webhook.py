@@ -31,7 +31,7 @@ from app.services.meeting_booking import (
     save_booking,
     set_meeting_state,
 )
-from app.services.email_service import build_booking_body, send_meeting_confirmation
+from app.services.email_service import build_booking_body, send_flow_completion_email, send_meeting_confirmation
 from app.services.meet_service import create_meeting_event
 
 
@@ -368,6 +368,7 @@ async def _generate_response_and_update(
 
         # ── Save flow confirmation if just completed ───────────────────────
         if flow_enabled and record_id and isinstance(updated_flow_state, dict) and updated_flow_state.get("completed"):
+            confirmation_payload: dict[str, Any] | None = None
             try:
                 confirmation_payload = build_flow_confirmation_details(flow_builder, updated_flow_state)
                 db_client.table("whatsapp_flow_confirmations").upsert(
@@ -383,6 +384,16 @@ async def _generate_response_and_update(
                 logger.exception(
                     "Failed to persist flow confirmation for conversation_id=%s", record_id
                 )
+
+            if confirmation_payload is not None:
+                try:
+                    await asyncio.to_thread(
+                        send_flow_completion_email,
+                        sender=sender,
+                        questions=confirmation_payload.get("questions", []),
+                    )
+                except Exception:
+                    logger.exception("Failed to send flow completion email for sender=%s", sender)
 
         # ── Update conversation in database ───────────────────────────────
         update_payload = {
