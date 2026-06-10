@@ -93,7 +93,6 @@ async def generate_summarized_instruction(raw_text: str) -> str:
         response = await asyncio.to_thread(
             client.responses.create,
             model="gpt-5-nano-2025-08-07",
-            temperature=0.2,
             instructions=system_prompt,
             input=raw_text,
             reasoning={"effort": "minimal"},
