@@ -19,6 +19,8 @@ async def generate_ai_reply(messages_for_ai: list[dict[str, str]]) -> str:
             client.responses.create,
             model="gpt-5-nano-2025-08-07",
             input=input_messages,
+            reasoning_effort="minimal",
+            verbosity="low",
         )
         return (response.output_text or "").strip()
     except Exception:

@@ -163,18 +163,30 @@ def send_meeting_confirmation(
     purpose: str,
     calendar_event_link: str = "",
 ) -> None:
-    """Send a confirmation email to the user and the admin via the Resend API."""
+    """Send a confirmation email to the user and a separate notification email to the admin."""
     if not settings.resend_api_key:
         logger.warning("RESEND_API_KEY not configured; skipping confirmation email")
         return
 
-    subject = f"Meeting Confirmed – {meeting_datetime.strftime('%b %d, %Y %I:%M %p UTC')}"
-    recipients: dict[str, bool] = {user_email: False}
-    if settings.admin_email and settings.admin_email != user_email:
-        recipients[settings.admin_email] = True
+    when = meeting_datetime.strftime("%b %d, %Y %I:%M %p UTC")
 
-    for address, is_admin in recipients.items():
-        body = _build_email_html(
+    user_body = _build_email_html(
+        user_name=user_name,
+        user_email=user_email,
+        meeting_datetime=meeting_datetime,
+        duration_minutes=duration_minutes,
+        meet_link=meet_link,
+        purpose=purpose,
+        calendar_event_link=calendar_event_link,
+        recipient_is_admin=False,
+    )
+    if _send_email(user_email, f"Meeting Confirmed – {when}", user_body):
+        logger.info("Confirmation email sent successfully to %s", user_email)
+    else:
+        logger.error("Confirmation email failed to send to %s", user_email)
+
+    if settings.admin_email:
+        admin_body = _build_email_html(
             user_name=user_name,
             user_email=user_email,
             meeting_datetime=meeting_datetime,
@@ -182,9 +194,11 @@ def send_meeting_confirmation(
             meet_link=meet_link,
             purpose=purpose,
             calendar_event_link=calendar_event_link,
-            recipient_is_admin=is_admin,
+            recipient_is_admin=True,
         )
-        if _send_email(address, subject, body):
-            logger.info("Confirmation email sent successfully to %s", address)
+        if _send_email(settings.admin_email, f"New Meeting Booked – {when}", admin_body):
+            logger.info("Admin notification email sent successfully to %s", settings.admin_email)
         else:
-            logger.error("Confirmation email failed to send to %s", address)
+            logger.error("Admin notification email failed to send to %s", settings.admin_email)
+    else:
+        logger.warning("ADMIN_EMAIL not configured; skipping admin notification email")

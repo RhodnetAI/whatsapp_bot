@@ -366,6 +366,16 @@ async def generate_bot_reply(
             "Never ask the user if they want to book or schedule anything. "
             "Answer only what the user asked without any scheduling-related call to action."
         )
+    elif bot["bot_table"] == "information_bot" and bot.get("scheduler_enabled"):
+        extra_sections.append(
+            "MEETING / CONSULTATION SUGGESTIONS: Do not end your response with a "
+            "suggestion, offer, or question about scheduling a meeting, call, "
+            "consultation, or appointment unless the user explicitly asks about "
+            "booking, scheduling, or speaking with someone. A separate system "
+            "process decides when to invite the user to schedule a meeting based "
+            "on their intent — do not duplicate, anticipate, or repeat that "
+            "invitation in your reply."
+        )
     if bot["bot_table"] == "information_bot":
         if bot["company_info_enabled"]:
             section = _build_company_info_section(bot, prompt_config)

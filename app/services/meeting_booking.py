@@ -603,7 +603,7 @@ def process_meeting_step(
         state["partial"] = partial
         state["step"] = "asked_email"
         return (
-            f"Thanks, *{text}*! What is your email address?\n\nExample: *john@example.com*" + _NO_FOOTER,
+            f"Thanks, *{text}*! What is your email address?\n\nExample: john@example.com*" + _NO_FOOTER,
             state,
             False,
             None,

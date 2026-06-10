@@ -277,6 +277,8 @@ async def _classify_and_rewrite_query(user_message: str, chat_history: Optional[
         model="gpt-5-nano-2025-08-07",
         instructions=_INTENT_COMBINED_SYSTEM_PROMPT,
         input=human_content,
+        reasoning_effort="minimal",
+        verbosity="low",
     )
     content = response.output_text or ""
     payload = _sanitize_json(content)
