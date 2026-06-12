@@ -42,6 +42,13 @@ class Settings:
     google_service_account_json: str
     google_calendar_id: str
     google_calendar_timezone: str
+    # Sales Bot — Razorpay + Meta Commerce Catalog + WhatsApp Flow
+    razorpay_key_id: str
+    razorpay_key_secret: str
+    razorpay_webhook_secret: str
+    meta_catalog_id: str
+    whatsapp_checkout_flow_id: str
+    public_base_url: str
 
 
 settings = Settings(
@@ -71,4 +78,10 @@ settings = Settings(
     google_service_account_json=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
     google_calendar_id=os.getenv("GOOGLE_CALENDAR_ID", "primary"),
     google_calendar_timezone=os.getenv("GOOGLE_CALENDAR_TIMEZONE", "Asia/Kolkata"),
+    razorpay_key_id=os.getenv("RAZORPAY_KEY_ID", ""),
+    razorpay_key_secret=os.getenv("RAZORPAY_KEY_SECRET", ""),
+    razorpay_webhook_secret=os.getenv("RAZORPAY_WEBHOOK_SECRET", ""),
+    meta_catalog_id=os.getenv("META_CATALOG_ID", ""),
+    whatsapp_checkout_flow_id=os.getenv("WHATSAPP_CHECKOUT_FLOW_ID", ""),
+    public_base_url=os.getenv("PUBLIC_BASE_URL", ""),
 )

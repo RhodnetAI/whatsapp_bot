@@ -42,7 +42,11 @@ _INFO_BOT_SECTION_COLS = {
     "products_services": "products_services_enabled",
     "scheduler": "scheduler_enabled",
 }
-_SALES_BOT_SECTION_COLS = {"company_info": "company_info_enabled"}
+_SALES_BOT_SECTION_COLS = {
+    "company_info": "company_info_enabled",
+    "sales_products": "sales_products_enabled",
+    "sales_payments": "payment_enabled",
+}
 
 
 def _ensure_row(table: str) -> None:

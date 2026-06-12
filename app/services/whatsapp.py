@@ -21,6 +21,22 @@ def send_whatsapp_text(sender: str, message: str) -> requests.Response:
     return requests.post(url, headers=headers, json=payload, timeout=20)
 
 
+def send_whatsapp_message(sender: str, message: dict) -> requests.Response:
+    """Send an arbitrary WhatsApp Cloud API message object. The caller supplies
+    the type-specific keys (e.g. ``{"type": "interactive", "interactive": {...}}``)
+    and this injects ``messaging_product`` + ``to``. Used by the Sales Bot to send
+    interactive lists, reply buttons, CTA-URL buttons, images, catalog product
+    messages, and Flows."""
+    url = f"https://graph.facebook.com/v25.0/{settings.phone_number_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {settings.meta_access_token}",
+        "Content-Type": "application/json",
+    }
+    wa_id = sender[1:] if sender.startswith("+") else sender
+    payload = {"messaging_product": "whatsapp", "to": wa_id, **message}
+    return requests.post(url, headers=headers, json=payload, timeout=20)
+
+
 def send_whatsapp_typing_indicator(message_id: str) -> requests.Response:
     """
     Send a WhatsApp typing indicator for a received message.

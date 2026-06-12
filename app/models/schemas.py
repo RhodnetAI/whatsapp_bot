@@ -260,6 +260,125 @@ class ConversationHistoryUpdate(BaseModel):
     enabled: bool
 
 
+# ── Sales Bot ────────────────────────────────────────────────────────────────
+
+
+class SalesProductItem(BaseModel):
+    id: str
+    retailer_id: str = ""
+    name: str = ""
+    description: str = ""
+    category: str = ""
+    price_minor: int = 0
+    currency: str = "INR"
+    image_url: str = ""
+    stock_quantity: Optional[int] = None
+    is_active: bool = True
+    meta_catalog_id: Optional[str] = None
+    sync_status: str = "pending"
+    sync_error: str = ""
+    source: Literal["manual", "imported"] = "manual"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class SalesProductCreate(BaseModel):
+    name: str = ""
+    description: str = ""
+    category: str = ""
+    price_minor: int = 0
+    currency: str = "INR"
+    image_url: str = ""
+    stock_quantity: Optional[int] = None
+    is_active: bool = True
+    retailer_id: Optional[str] = None  # auto-generated when omitted
+
+
+class SalesProductUpdate(BaseModel):
+    name: str = ""
+    description: str = ""
+    category: str = ""
+    price_minor: int = 0
+    currency: str = "INR"
+    image_url: str = ""
+    stock_quantity: Optional[int] = None
+    is_active: bool = True
+
+
+class SalesProductsListResponse(BaseModel):
+    items: list[SalesProductItem] = []
+
+
+class SalesProductSaveResponse(BaseModel):
+    item: SalesProductItem
+
+
+class SalesProductsUploadStartResponse(BaseModel):
+    job_id: str
+    total: int
+
+
+class SalesProductsUploadStatusResponse(BaseModel):
+    status: Literal["processing", "done", "failed"]
+    total: int
+    processed: int
+    items: list[SalesProductItem] = []
+    error: Optional[str] = None
+
+
+class SalesCatalogSyncResponse(BaseModel):
+    synced: int = 0
+    failed: int = 0
+    items: list[SalesProductItem] = []
+
+
+class SalesPaymentSettingsUpdate(BaseModel):
+    # payment_enabled is toggled via the sidebar section switch (/settings/sections),
+    # so it is intentionally not part of this currency/shipping update.
+    default_currency: str = "INR"
+    flat_shipping_minor: int = 0
+    free_shipping_threshold_minor: Optional[int] = None
+
+
+class SalesPaymentSettingsResponse(BaseModel):
+    payment_enabled: bool = False
+    default_currency: str = "INR"
+    flat_shipping_minor: int = 0
+    free_shipping_threshold_minor: Optional[int] = None
+    razorpay_configured: bool = False
+    catalog_configured: bool = False
+    checkout_flow_configured: bool = False
+
+
+class SalesOrderItemOut(BaseModel):
+    name: str = ""
+    retailer_id: str = ""
+    quantity: int = 1
+    unit_price_minor: int = 0
+    line_total_minor: int = 0
+
+
+class SalesOrderOut(BaseModel):
+    id: str
+    order_number: str
+    sender: str
+    status: str
+    subtotal_minor: int = 0
+    shipping_minor: int = 0
+    total_minor: int = 0
+    currency: str = "INR"
+    customer_name: str = ""
+    customer_phone: str = ""
+    shipping_address: dict = {}
+    payment_status: str = "created"
+    created_at: Optional[str] = None
+    items: list[SalesOrderItemOut] = []
+
+
+class SalesOrdersListResponse(BaseModel):
+    orders: list[SalesOrderOut] = []
+
+
 class SettingsResponse(BaseModel):
     active_bot: str = "information_bot"
     bot_name: str | None = None

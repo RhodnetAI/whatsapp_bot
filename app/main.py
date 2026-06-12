@@ -9,6 +9,8 @@ from app.api.routes.clients import router as clients_router
 from app.api.routes.health import router as health_router
 from app.api.routes.knowledge import router as knowledge_router
 from app.api.routes.products_services import router as products_services_router
+from app.api.routes.razorpay_webhook import router as razorpay_router
+from app.api.routes.sales import router as sales_router
 from app.api.routes.scheduler import router as scheduler_router
 from app.api.routes.setup import router as setup_router
 from app.api.routes.webhook import router as webhook_router
@@ -66,4 +68,6 @@ app.include_router(setup_router)
 app.include_router(knowledge_router)
 app.include_router(products_services_router)
 app.include_router(scheduler_router)
+app.include_router(sales_router)
+app.include_router(razorpay_router)
 app.include_router(health_router)

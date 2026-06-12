@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request
 from app.core.config import settings
 from app.db.supabase_client import first_row, supabase, supabase_admin
 from app.services.bot_chat import generate_bot_reply, is_first_message_of_session
+from app.services.sales.handler import handle_sales_message
 from app.services.whatsapp import send_whatsapp_text, send_whatsapp_typing_indicator
 from app.services.flow_ai import (
     should_use_flow,
@@ -41,6 +42,19 @@ logger = logging.getLogger("whatsapp")
 
 def _conversation_client() -> Any:
     return supabase_admin if supabase_admin is not None else supabase
+
+
+async def _active_bot_is_sales() -> bool:
+    """True when the Sales Bot is the selected bot. Used to route the webhook to
+    the self-contained sales pipeline; otherwise the Information Bot path runs."""
+    try:
+        row = first_row(
+            _conversation_client().table("sales_bot").select("is_selected").eq("id", 1).limit(1).execute()
+        )
+        return bool(row and row.get("is_selected"))
+    except Exception:
+        logger.exception("Failed to check sales_bot selection")
+        return False
 
 
 @router.get("/webhook")
@@ -460,17 +474,32 @@ async def process_message(data: Any) -> None:
         message_type,
     )
 
-    # Now extract text for text messages only
+    if not isinstance(sender, str) or not sender:
+        return
+    if not sender.startswith("+"):
+        sender = f"+{sender}"
+
+    # ── Routing fork: the Sales Bot owns its own pipeline end-to-end ─────────
+    # (interactive lists/buttons, native-cart `order` messages, Flow replies).
+    # Reached for every inbound message; when the Sales Bot is selected the
+    # Information Bot path below is skipped entirely (mutual exclusivity).
+    try:
+        if await _active_bot_is_sales():
+            # Process in the background so the webhook returns within WhatsApp's
+            # timeout (same pattern as the Information Bot path below).
+            asyncio.create_task(handle_sales_message(sender, message, message_id))
+            return
+    except Exception:
+        logger.exception("Sales routing failed for sender=%s", sender)
+        return
+
+    # ── Information Bot path (text only, unchanged below) ───────────────────
     text = ""
     text_field = message.get("text")
     if isinstance(text_field, dict):
         text = text_field.get("body", "") or ""
-
-    if not isinstance(sender, str) or text == "":
+    if text == "":
         return
-
-    if not sender.startswith("+"):
-        sender = f"+{sender}"
 
     # Parallelize database queries: check blocked status + fetch existing conversation
     db_client = _conversation_client()
