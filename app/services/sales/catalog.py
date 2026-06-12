@@ -73,12 +73,6 @@ def parse_price_to_minor(value: Any) -> int:
 
 def _row_to_item(row: dict[str, Any]) -> SalesProductItem:
     stock = row.get("stock_quantity")
-    # Normalize legacy 'excel' source values to 'imported' so Pydantic's
-    # SalesProductItem Literal validation accepts them.
-    src = row.get("source") or "manual"
-    if src == "excel":
-        src = "imported"
-
     return SalesProductItem(
         id=str(row.get("id")),
         retailer_id=row.get("retailer_id") or "",
@@ -93,7 +87,7 @@ def _row_to_item(row: dict[str, Any]) -> SalesProductItem:
         meta_catalog_id=row.get("meta_catalog_id"),
         sync_status=row.get("sync_status") or "pending",
         sync_error=row.get("sync_error") or "",
-        source=src,
+        source=row.get("source") or "manual",
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
     )
@@ -295,9 +289,7 @@ def _process_upload_job(job_id: str, rows: list[dict[str, Any]]) -> None:
     job = _upload_jobs[job_id]
     try:
         for fields in rows:
-            # Mark imported sales products as 'imported' so they match the
-            # SalesProductItem `source` literal ("manual" | "imported").
-            item = _insert_product_fields(fields, source="imported")
+            item = _insert_product_fields(fields, source="excel")
             job["items"].append(item)
             job["processed"] += 1
         job["status"] = "done"

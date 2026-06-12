@@ -277,7 +277,7 @@ class SalesProductItem(BaseModel):
     meta_catalog_id: Optional[str] = None
     sync_status: str = "pending"
     sync_error: str = ""
-    source: Literal["manual", "imported"] = "manual"
+    source: Literal["manual", "excel"] = "manual"
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
