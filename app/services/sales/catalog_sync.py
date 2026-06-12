@@ -33,7 +33,8 @@ def is_configured() -> bool:
 
 def _product_payload(row: dict[str, Any]) -> dict[str, Any]:
     currency = (row.get("currency") or "INR").upper()
-    # Graph API expects price as a number in the currency's minor unit (e.g. cents/paise).
+    # The /{catalog_id}/products edge expects price as an integer in the
+    # currency's minor units (e.g. paise/cents) with currency sent separately.
     price_minor = int(row.get("price_minor") or 0)
     in_stock = bool(row.get("is_active", True)) and (
         row.get("stock_quantity") is None or int(row.get("stock_quantity") or 0) > 0
