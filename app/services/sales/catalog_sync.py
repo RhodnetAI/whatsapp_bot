@@ -33,9 +33,8 @@ def is_configured() -> bool:
 
 def _product_payload(row: dict[str, Any]) -> dict[str, Any]:
     currency = (row.get("currency") or "INR").upper()
-    # Graph API expects price as a string "<amount> <CURRENCY>" (major units).
-    amount = int(row.get("price_minor") or 0) / 100
-    price_str = f"{amount:.2f} {currency}"
+    # Graph API expects price as a number in the currency's minor unit (e.g. cents/paise).
+    price_minor = int(row.get("price_minor") or 0)
     in_stock = bool(row.get("is_active", True)) and (
         row.get("stock_quantity") is None or int(row.get("stock_quantity") or 0) > 0
     )
@@ -44,7 +43,7 @@ def _product_payload(row: dict[str, Any]) -> dict[str, Any]:
         "retailer_id": row.get("retailer_id"),
         "name": row.get("name") or "Product",
         "description": row.get("description") or row.get("name") or "Product",
-        "price": price_str,
+        "price": price_minor,
         "currency": currency,
         "image_url": row.get("image_url") or "",
         "url": url,
