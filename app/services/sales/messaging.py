@@ -13,13 +13,18 @@ from typing import Any
 MENU_BROWSE = "menu_browse"
 MENU_CART = "menu_cart"
 MENU_TRACK = "menu_track"
-MENU_HUMAN = "menu_human"
+MENU_AI = "menu_ai"        # "Talk to AI" — LLM Q&A over the catalog
 CART_CHECKOUT = "cart_checkout"
 CART_CLEAR = "cart_clear"
+FLOW_SEARCH = "flow_search"  # prompt for a free-text product/category search
+FLOW_EXIT = "flow_exit"      # leave the shopping flow → main menu
 CAT_PREFIX = "cat:"        # cat:<category>
 PROD_PREFIX = "prod:"      # prod:<product_id>
-ADD_PREFIX = "add:"        # add:<product_id>
-QTY_PREFIX = "qty:"        # qty:<product_id>:<n>
+ADD_PREFIX = "add:"        # add:<product_id>  (adds quantity 1)
+CITEM_PREFIX = "citem:"    # citem:<product_id>  (open a cart line to manage)
+INC_PREFIX = "inc:"        # inc:<product_id>  (quantity +1)
+DEC_PREFIX = "dec:"        # dec:<product_id>  (quantity -1; removes at 0)
+RM_PREFIX = "rm:"          # rm:<product_id>   (remove the line)
 
 # WhatsApp limits
 _LIST_ROW_TITLE = 24

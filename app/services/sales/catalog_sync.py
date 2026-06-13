@@ -40,7 +40,7 @@ def _product_payload(row: dict[str, Any]) -> dict[str, Any]:
         row.get("stock_quantity") is None or int(row.get("stock_quantity") or 0) > 0
     )
     url = settings.public_base_url.rstrip("/") if settings.public_base_url else "https://wa.me"
-    return {
+    payload: dict[str, Any] = {
         "retailer_id": row.get("retailer_id"),
         "name": row.get("name") or "Product",
         "description": row.get("description") or row.get("name") or "Product",
@@ -52,6 +52,31 @@ def _product_payload(row: dict[str, Any]) -> dict[str, Any]:
         "condition": "new",
         "brand": "Store",
     }
+
+    # Sale price — only set when an actual discount applies (Meta requires
+    # sale_price < price).
+    discount_percentage = float(row.get("discount_percentage") or 0)
+    sale_price_minor = int(row.get("sale_price_minor") or 0)
+    if discount_percentage > 0 and 0 < sale_price_minor < price_minor:
+        payload["sale_price"] = sale_price_minor
+        payload["sale_price_currency"] = currency
+
+    # Extra catalog attributes — mapped to their Meta Commerce Catalog fields
+    # where one exists. Fields with no Meta equivalent (delivery date, ratings,
+    # discount percentage itself) are intentionally not sent.
+    if row.get("google_product_category"):
+        payload["google_product_category"] = row["google_product_category"]
+    if row.get("size"):
+        payload["size"] = row["size"]
+    if row.get("color"):
+        payload["color"] = row["color"]
+    if row.get("model"):
+        payload["mpn"] = row["model"]
+    quantity_to_sell = row.get("quantity_to_sell")
+    if quantity_to_sell is not None:
+        payload["inventory"] = int(quantity_to_sell)
+
+    return payload
 
 
 def _sync_one(row: dict[str, Any], access_token: str, catalog_id: str) -> tuple[bool, str, str | None]:

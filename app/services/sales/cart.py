@@ -107,6 +107,43 @@ def get_items(sender: str) -> list[dict[str, Any]]:
     return out
 
 
+def update_quantity(sender: str, product_id: str, delta: int) -> int:
+    """Increment/decrement a cart line by ``delta``. Removes the line if the
+    resulting quantity is 0 or less. Returns the resulting quantity (0 when the
+    line was removed or did not exist)."""
+    cart = first_row(
+        _db().table(CARTS).select("id").eq("sender", sender).eq("status", "active").execute()
+    )
+    if not cart:
+        return 0
+    existing = first_row(
+        _db()
+        .table(CART_ITEMS)
+        .select("*")
+        .eq("cart_id", cart["id"])
+        .eq("product_id", product_id)
+        .execute()
+    )
+    if not existing:
+        return 0
+    new_qty = int(existing.get("quantity") or 0) + int(delta)
+    if new_qty <= 0:
+        _db().table(CART_ITEMS).delete().eq("id", existing["id"]).execute()
+        return 0
+    _db().table(CART_ITEMS).update({"quantity": new_qty}).eq("id", existing["id"]).execute()
+    return new_qty
+
+
+def remove_item(sender: str, product_id: str) -> None:
+    """Remove a single product line from the sender's active cart."""
+    cart = first_row(
+        _db().table(CARTS).select("id").eq("sender", sender).eq("status", "active").execute()
+    )
+    if not cart:
+        return
+    _db().table(CART_ITEMS).delete().eq("cart_id", cart["id"]).eq("product_id", product_id).execute()
+
+
 def clear_cart(sender: str) -> None:
     cart = first_row(
         _db().table(CARTS).select("id").eq("sender", sender).eq("status", "active").execute()

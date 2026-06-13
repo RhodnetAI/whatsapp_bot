@@ -278,6 +278,16 @@ class SalesProductItem(BaseModel):
     sync_status: str = "pending"
     sync_error: str = ""
     source: Literal["manual", "excel"] = "manual"
+    discount_percentage: float = 0
+    sale_price_minor: int = 0
+    google_product_category: str = ""
+    size: str = ""
+    model: str = ""
+    color: str = ""
+    delivery_date: Optional[str] = None
+    quantity_to_sell: Optional[int] = None
+    rating_average: Optional[float] = None
+    rating_count: Optional[int] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -292,6 +302,15 @@ class SalesProductCreate(BaseModel):
     stock_quantity: Optional[int] = None
     is_active: bool = True
     retailer_id: Optional[str] = None  # auto-generated when omitted
+    discount_percentage: float = 0
+    google_product_category: str = ""
+    size: str = ""
+    model: str = ""
+    color: str = ""
+    delivery_date: Optional[str] = None
+    quantity_to_sell: Optional[int] = None
+    rating_average: Optional[float] = None
+    rating_count: Optional[int] = None
 
 
 class SalesProductUpdate(BaseModel):
@@ -303,6 +322,15 @@ class SalesProductUpdate(BaseModel):
     image_url: str = ""
     stock_quantity: Optional[int] = None
     is_active: bool = True
+    discount_percentage: float = 0
+    google_product_category: str = ""
+    size: str = ""
+    model: str = ""
+    color: str = ""
+    delivery_date: Optional[str] = None
+    quantity_to_sell: Optional[int] = None
+    rating_average: Optional[float] = None
+    rating_count: Optional[int] = None
 
 
 class SalesProductsListResponse(BaseModel):

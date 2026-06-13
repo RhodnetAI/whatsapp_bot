@@ -41,6 +41,21 @@ _COLUMN_ALIASES = {
     "stock quantity": "stock_quantity",
     "status": "status",
     "active": "status",
+    "discount": "discount_percentage",
+    "discount percentage": "discount_percentage",
+    "discount percent": "discount_percentage",
+    "discount %": "discount_percentage",
+    "google product category": "google_product_category",
+    "google category": "google_product_category",
+    "size": "size",
+    "model": "model",
+    "color": "color",
+    "colour": "color",
+    "delivery date": "delivery_date",
+    "quantity to sell": "quantity_to_sell",
+    "rating average": "rating_average",
+    "rating avg": "rating_average",
+    "rating count": "rating_count",
 }
 
 # In-memory Excel upload job tracking (admin-only, low volume) — mirrors the
@@ -71,8 +86,66 @@ def parse_price_to_minor(value: Any) -> int:
         return 0
 
 
+def _clamp_discount_percentage(value: Any) -> float:
+    try:
+        v = float(value or 0)
+    except (TypeError, ValueError):
+        v = 0.0
+    return max(0.0, min(100.0, v))
+
+
+def compute_sale_price_minor(price_minor: int, discount_percentage: float) -> int:
+    """The discounted price (in minor units) after applying ``discount_percentage``
+    to ``price_minor``. With no discount, the sale price equals the price."""
+    if discount_percentage <= 0:
+        return int(price_minor)
+    return max(0, round(price_minor * (1 - discount_percentage / 100)))
+
+
+def _require_google_product_category(value: str | None) -> str:
+    category = (value or "").strip()
+    if not category:
+        raise HTTPException(status_code=400, detail="Google Product Category is required")
+    return category
+
+
+def _parse_optional_int(value: Any) -> int | None:
+    s = (str(value) if value is not None else "").strip()
+    if not s:
+        return None
+    try:
+        return int(float(s))
+    except ValueError:
+        return None
+
+
+def _parse_optional_float(value: Any) -> float | None:
+    s = (str(value) if value is not None else "").strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _parse_date(value: Any) -> str | None:
+    s = (str(value) if value is not None else "").strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
 def _row_to_item(row: dict[str, Any]) -> SalesProductItem:
     stock = row.get("stock_quantity")
+    qty_to_sell = row.get("quantity_to_sell")
+    rating_avg = row.get("rating_average")
+    rating_count = row.get("rating_count")
     return SalesProductItem(
         id=str(row.get("id")),
         retailer_id=row.get("retailer_id") or "",
@@ -88,6 +161,16 @@ def _row_to_item(row: dict[str, Any]) -> SalesProductItem:
         sync_status=row.get("sync_status") or "pending",
         sync_error=row.get("sync_error") or "",
         source=row.get("source") or "manual",
+        discount_percentage=float(row.get("discount_percentage") or 0),
+        sale_price_minor=int(row.get("sale_price_minor") or 0),
+        google_product_category=row.get("google_product_category") or "",
+        size=row.get("size") or "",
+        model=row.get("model") or "",
+        color=row.get("color") or "",
+        delivery_date=row.get("delivery_date"),
+        quantity_to_sell=int(qty_to_sell) if qty_to_sell is not None else None,
+        rating_average=float(rating_avg) if rating_avg is not None else None,
+        rating_count=int(rating_count) if rating_count is not None else None,
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
     )
@@ -127,19 +210,31 @@ def _insert_product_fields(fields: dict[str, Any], source: str) -> SalesProductI
     """Insert one product row from a plain fields dict (shared by manual create
     and Excel upload)."""
     now = datetime.now(timezone.utc).isoformat()
+    price_minor = int(fields.get("price_minor") or 0)
+    discount_percentage = _clamp_discount_percentage(fields.get("discount_percentage"))
     row = {
         "id": str(uuid.uuid4()),
         "retailer_id": (str(fields.get("retailer_id") or "")).strip() or _generate_retailer_id(),
         "name": fields.get("name") or "",
         "description": fields.get("description") or "",
         "category": fields.get("category") or "",
-        "price_minor": int(fields.get("price_minor") or 0),
+        "price_minor": price_minor,
         "currency": fields.get("currency") or "INR",
         "image_url": fields.get("image_url") or "",
         "stock_quantity": fields.get("stock_quantity"),
         "is_active": bool(fields.get("is_active", True)),
         "source": source,
         "sync_status": "pending",
+        "discount_percentage": discount_percentage,
+        "sale_price_minor": compute_sale_price_minor(price_minor, discount_percentage),
+        "google_product_category": _require_google_product_category(fields.get("google_product_category")),
+        "size": fields.get("size") or "",
+        "model": fields.get("model") or "",
+        "color": fields.get("color") or "",
+        "delivery_date": fields.get("delivery_date") or None,
+        "quantity_to_sell": fields.get("quantity_to_sell"),
+        "rating_average": fields.get("rating_average"),
+        "rating_count": fields.get("rating_count"),
         "created_at": now,
         "updated_at": now,
     }
@@ -163,6 +258,15 @@ def create_product(payload: SalesProductCreate) -> SalesProductItem:
             "image_url": payload.image_url,
             "stock_quantity": payload.stock_quantity,
             "is_active": bool(payload.is_active),
+            "discount_percentage": payload.discount_percentage,
+            "google_product_category": payload.google_product_category,
+            "size": payload.size,
+            "model": payload.model,
+            "color": payload.color,
+            "delivery_date": payload.delivery_date,
+            "quantity_to_sell": payload.quantity_to_sell,
+            "rating_average": payload.rating_average,
+            "rating_count": payload.rating_count,
         },
         source="manual",
     )
@@ -172,15 +276,27 @@ def update_product(product_id: str, payload: SalesProductUpdate) -> SalesProduct
     existing = get_row(product_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Product not found")
+    price_minor = int(payload.price_minor or 0)
+    discount_percentage = _clamp_discount_percentage(payload.discount_percentage)
     update = {
         "name": payload.name,
         "description": payload.description,
         "category": payload.category,
-        "price_minor": int(payload.price_minor or 0),
+        "price_minor": price_minor,
         "currency": payload.currency or "INR",
         "image_url": payload.image_url,
         "stock_quantity": payload.stock_quantity,
         "is_active": bool(payload.is_active),
+        "discount_percentage": discount_percentage,
+        "sale_price_minor": compute_sale_price_minor(price_minor, discount_percentage),
+        "google_product_category": _require_google_product_category(payload.google_product_category),
+        "size": payload.size,
+        "model": payload.model,
+        "color": payload.color,
+        "delivery_date": payload.delivery_date or None,
+        "quantity_to_sell": payload.quantity_to_sell,
+        "rating_average": payload.rating_average,
+        "rating_count": payload.rating_count,
         # Any edit means the Meta catalog copy is stale again.
         "sync_status": "pending" if existing.get("sync_status") == "synced" else existing.get("sync_status"),
     }
@@ -222,6 +338,15 @@ def _excel_row_to_fields(raw: dict[str, str]) -> dict[str, Any]:
         "image_url": (raw.get("image_url") or "").strip(),
         "stock_quantity": stock,
         "is_active": is_active,
+        "discount_percentage": _clamp_discount_percentage(_parse_optional_float(raw.get("discount_percentage"))),
+        "google_product_category": (raw.get("google_product_category") or "").strip(),
+        "size": (raw.get("size") or "").strip(),
+        "model": (raw.get("model") or "").strip(),
+        "color": (raw.get("color") or "").strip(),
+        "delivery_date": _parse_date(raw.get("delivery_date")),
+        "quantity_to_sell": _parse_optional_int(raw.get("quantity_to_sell")),
+        "rating_average": _parse_optional_float(raw.get("rating_average")),
+        "rating_count": _parse_optional_int(raw.get("rating_count")),
     }
 
 
@@ -246,6 +371,8 @@ def _parse_excel_rows(raw_bytes: bytes) -> list[dict[str, Any]]:
 
     if "name" not in column_map.values():
         raise HTTPException(status_code=400, detail="Excel file must include a 'Name' column")
+    if "google_product_category" not in column_map.values():
+        raise HTTPException(status_code=400, detail="Excel file must include a 'Google Product Category' column")
 
     rows: list[dict[str, Any]] = []
     for raw_row in rows_iter:
@@ -257,6 +384,9 @@ def _parse_excel_rows(raw_bytes: bytes) -> list[dict[str, Any]]:
                 raw_fields[field_name] = str(raw_row[index]).strip()
         fields = _excel_row_to_fields(raw_fields)
         if not fields["name"]:
+            continue
+        # Google Product Category is mandatory — reject rows missing it.
+        if not fields["google_product_category"]:
             continue
         rows.append(fields)
         if len(rows) >= MAX_EXCEL_ROWS:
