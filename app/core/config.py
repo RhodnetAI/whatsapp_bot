@@ -49,6 +49,14 @@ class Settings:
     meta_catalog_id: str
     whatsapp_checkout_flow_id: str
     public_base_url: str
+    # Sales Bot — "Open Store" data-exchange Flow (Path B). The store Flow is a
+    # single dynamic Flow that covers browse/cart/track/checkout; it requires an
+    # RSA keypair registered with WhatsApp Business Encryption (see
+    # backend/scripts/generate_flow_keys.py). Leaving these blank keeps the bot in
+    # the chat-based browsing fallback (graceful degradation).
+    whatsapp_store_flow_id: str
+    whatsapp_flow_private_key: str
+    whatsapp_flow_private_key_passphrase: str
 
 
 settings = Settings(
@@ -84,4 +92,8 @@ settings = Settings(
     meta_catalog_id=os.getenv("META_CATALOG_ID", ""),
     whatsapp_checkout_flow_id=os.getenv("WHATSAPP_CHECKOUT_FLOW_ID", ""),
     public_base_url=os.getenv("PUBLIC_BASE_URL", ""),
+    whatsapp_store_flow_id=os.getenv("WHATSAPP_STORE_FLOW_ID", ""),
+    # PEM string; tolerate \n-escaped values copied into a single-line env var.
+    whatsapp_flow_private_key=os.getenv("WHATSAPP_FLOW_PRIVATE_KEY", "").replace("\\n", "\n"),
+    whatsapp_flow_private_key_passphrase=os.getenv("WHATSAPP_FLOW_PRIVATE_KEY_PASSPHRASE", ""),
 )

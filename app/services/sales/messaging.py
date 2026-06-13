@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 # ── Interactive reply IDs (referenced by handler.py) ─────────────────────────
+MENU_STORE = "menu_store"  # "Open Store" — launches the data-exchange Flow (Path B)
 MENU_BROWSE = "menu_browse"
 MENU_CART = "menu_cart"
 MENU_TRACK = "menu_track"
@@ -177,6 +178,41 @@ def flow(
                 "flow_action_payload": {"screen": screen},
             },
         },
+    }
+    if header_text:
+        interactive["header"] = {"type": "text", "text": _clip(header_text, _HEADER_TEXT)}
+    return {"type": "interactive", "interactive": interactive}
+
+
+def store_flow(
+    flow_id: str,
+    sender: str,
+    body: str = "Tap below to open the store — browse, manage your cart, track an order, and checkout, all in one place.",
+    cta_text: str = "🏬 Open Store",
+    header_text: str | None = "Open Store",
+    mode: str | None = None,
+) -> dict:
+    """The "Open Store" data-exchange Flow message (Path B).
+
+    Opens the Flow at ``STORE_HOME`` with ``navigate`` (STORE_HOME is static, so
+    no endpoint round-trip is needed to render it — its buttons then trigger the
+    data-exchange endpoint). ``flow_token`` is ``"store:<sender>"`` so every
+    subsequent data-exchange request identifies the conversation/cart with no
+    extra lookup. Pass ``mode="draft"`` while testing an unpublished Flow."""
+    params: dict[str, Any] = {
+        "flow_message_version": "3",
+        "flow_token": f"store:{sender}",
+        "flow_id": flow_id,
+        "flow_cta": _clip(cta_text, _BTN_TITLE),
+        "flow_action": "navigate",
+        "flow_action_payload": {"screen": "STORE_HOME"},
+    }
+    if mode:
+        params["mode"] = mode
+    interactive: dict[str, Any] = {
+        "type": "flow",
+        "body": {"text": _clip(body, _BODY_TEXT)},
+        "action": {"name": "flow", "parameters": params},
     }
     if header_text:
         interactive["header"] = {"type": "text", "text": _clip(header_text, _HEADER_TEXT)}

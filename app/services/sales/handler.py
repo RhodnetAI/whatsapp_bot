@@ -129,22 +129,44 @@ async def load_sales_config() -> dict[str, Any]:
         "free_shipping_threshold_minor": row.get("free_shipping_threshold_minor"),
         "catalog_id": settings.meta_catalog_id or "",
         "flow_id": settings.whatsapp_checkout_flow_id or "",
+        "store_flow_id": settings.whatsapp_store_flow_id or "",
     }
 
 
 # ── Menu & navigation ────────────────────────────────────────────────────────
 def _main_menu(cfg: dict[str, Any]) -> dict[str, Any]:
-    rows = [
-        m.list_row(m.MENU_BROWSE, "🛍️ Browse products", "See what's available"),
-        m.list_row(m.MENU_CART, "🛒 View cart", "Review items & checkout"),
-        m.list_row(m.MENU_TRACK, "📦 Track order", "Check an order's status"),
-        m.list_row(m.MENU_AI, "🤖 Talk to AI", "Ask about our products"),
-    ]
+    # Path B: once the "Open Store" data-exchange Flow is configured, the menu
+    # collapses to two rows — the Flow covers browse/cart/track/checkout in one
+    # in-app sheet. Without it (no encryption keypair / Flow published yet) we
+    # fall back to the chat-based browsing rows, so the bot still works fully.
+    if cfg.get("store_flow_id"):
+        rows = [
+            m.list_row(m.MENU_STORE, "🏬 Open Store", "Browse, cart, track & checkout"),
+            m.list_row(m.MENU_AI, "🤖 Talk to AI", "Ask about our products"),
+        ]
+    else:
+        rows = [
+            m.list_row(m.MENU_BROWSE, "🛍️ Browse products", "See what's available"),
+            m.list_row(m.MENU_CART, "🛒 View cart", "Review items & checkout"),
+            m.list_row(m.MENU_TRACK, "📦 Track order", "Check an order's status"),
+            m.list_row(m.MENU_AI, "🤖 Talk to AI", "Ask about our products"),
+        ]
     return m.list_message(
         body=WELCOME,
         button_text="Menu",
         sections=[m.section("Options", rows)],
     )
+
+
+async def _open_store(sender: str, cfg: dict[str, Any]):
+    """Send the single "Open Store" Flow message. The Flow itself (via the
+    data-exchange endpoint) handles browse/cart/track/checkout; we only step back
+    into chat at the very end for the Razorpay payment link."""
+    if not cfg.get("store_flow_id"):
+        # Shouldn't happen (the row is only shown when configured), but degrade
+        # gracefully to the chat browse path.
+        return await _browse_categories(sender, cfg)
+    return [m.store_flow(flow_id=cfg["store_flow_id"], sender=sender)], _idle()
 
 
 def _menu_messages(cfg: dict[str, Any], greet: bool) -> list[dict[str, Any]]:
@@ -530,8 +552,31 @@ def _parse_address_lines(text: str) -> dict[str, str]:
 
 
 async def _handle_address_flow(sender: str, flow_data: dict[str, Any], cfg: dict[str, Any]):
-    order_number = str(flow_data.get("flow_token") or "")
-    order = orders.get_order_by_number(order_number) if order_number else None
+    """Handle a completed Flow submission (``nfm_reply``).
+
+    Two Flows submit here:
+      * The "Open Store" data-exchange Flow (Path B) — its SUCCESS screen sends
+        ``{flow_token: "store:…", order_number: "ORD-…"}``. Delivery details were
+        already captured *inside* the Flow (the ADDRESS screen called
+        ``orders.set_customer_details``), so we go straight to the payment link.
+      * The standalone address Flow (fallback) — sends name/address/city/pincode
+        with ``flow_token`` = the order number; we set the details here first.
+    """
+    token = str(flow_data.get("flow_token") or "")
+    order_number = str(flow_data.get("order_number") or "")
+
+    # Path B store Flow completion: order already at pending_payment with details.
+    if token.startswith("store:") or (order_number and not flow_data.get("address")):
+        order = orders.get_order_by_number(order_number) if order_number else None
+        if not order:
+            order = orders.latest_order_for_sender(sender)
+        if not order:
+            return [m.text("We couldn't find your order. Type *menu* to start again.")], _idle()
+        order["items"] = orders.get_order_items(order["id"])
+        return await _send_payment_link(sender, order, cfg)
+
+    # Standalone address Flow: flow_token carries the order number.
+    order = orders.get_order_by_number(token) if token else None
     if not order:
         order = orders.latest_order_for_sender(sender)
     if not order:
@@ -563,9 +608,21 @@ async def _handle_address_text(sender: str, text: str, state: dict[str, Any], cf
 
 
 async def _finalize_payment(sender, order, name, phone, address, cfg):
+    """Save the delivery details (status → pending_payment), then send the
+    payment link. Used by the chat/address-Flow path where details are collected
+    here. (The Path B store Flow saves details inside the Flow and calls
+    :func:`_send_payment_link` directly.)"""
     orders.set_customer_details(order["id"], name, phone, address)
     order = orders.get_order(order["id"]) or order
     order["items"] = orders.get_order_items(order["id"])
+    return await _send_payment_link(sender, order, cfg)
+
+
+async def _send_payment_link(sender, order, cfg):
+    """Create + send the Razorpay "Pay ₹X" CTA for an order whose customer
+    details are already saved (status pending_payment). Shared by the chat path
+    and the Path B store Flow completion."""
+    name = order.get("customer_name") or "there"
     currency = order.get("currency") or cfg["currency"]
 
     if not cfg["payment_enabled"] or not razorpay_service.is_configured():
@@ -644,6 +701,8 @@ async def _handle_track(sender: str, text: str, cfg: dict[str, Any]):
 
 # ── Reply dispatch ───────────────────────────────────────────────────────────
 async def _handle_reply(sender: str, rid: str, state: dict[str, Any], cfg: dict[str, Any]):
+    if rid == m.MENU_STORE:
+        return await _open_store(sender, cfg)
     if rid == m.MENU_BROWSE:
         return await _browse_categories(sender, cfg)
     if rid == m.MENU_CART:

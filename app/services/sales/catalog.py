@@ -449,3 +449,32 @@ def distinct_active_categories(rows: list[dict[str, Any]]) -> list[str]:
         if cat not in seen:
             seen.append(cat)
     return seen
+
+
+# ── Read helpers for the "Open Store" data-exchange Flow ─────────────────────
+# Thin wrappers over the active-rows query above, returning plain dicts shaped
+# for the Flow screens. Used by ``app.api.routes.flow_store`` (Path B); the
+# chat-based browsing handlers use ``fetch_active_rows`` / ``get_row`` directly.
+def get_categories() -> list[str]:
+    """Distinct active categories, in catalog order (``Other`` for blanks)."""
+    return distinct_active_categories(fetch_active_rows())
+
+
+def get_products_by_category(category: str) -> list[dict[str, Any]]:
+    """All active product rows whose category matches ``category`` (blank
+    categories fold into ``Other``, matching :func:`get_categories`)."""
+    target = (category or "").strip() or "Other"
+    out: list[dict[str, Any]] = []
+    for row in fetch_active_rows():
+        cat = (row.get("category") or "").strip() or "Other"
+        if cat == target:
+            out.append(row)
+    return out
+
+
+def get_product(product_id: str) -> dict[str, Any] | None:
+    """A single active product row by id, or None if missing/inactive."""
+    row = get_row(product_id)
+    if not row or not row.get("is_active", True):
+        return None
+    return row
