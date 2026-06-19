@@ -86,12 +86,19 @@ def main() -> None:
     print("=" * 70)
     print(public_pem)
 
+    import base64
+
     print("=" * 70)
-    print("PRIVATE KEY — keep secret; put in backend/.env as WHATSAPP_FLOW_PRIVATE_KEY")
-    print("(single line, with literal \\n between PEM lines):")
+    print("PRIVATE KEY — keep secret; set WHATSAPP_FLOW_PRIVATE_KEY in backend/.env")
+    print("Easiest / least error-prone: paste this BASE64 one-liner (no newline or")
+    print("quoting issues — the backend base64-decodes it automatically):")
     print("=" * 70)
-    print(repr(private_pem.replace("\n", "\\n")))
+    print(base64.b64encode(private_pem.encode("utf-8")).decode("utf-8"))
     print()
+    print("OR paste the raw PEM below verbatim (Render's env field accepts real")
+    print("multi-line values; do NOT add quotes or \\n escapes):")
+    print("-" * 70)
+    print(private_pem)
 
     if args.register:
         register_public_key(public_pem)

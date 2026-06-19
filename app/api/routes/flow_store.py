@@ -147,13 +147,18 @@ def _cart_screen(sender: str, cfg: dict[str, Any], flash: str = "") -> dict[str,
     if flash:
         summary = f"{flash}\n\n{summary}"
 
+    # The cart's quantity dropdown leads with "0 — remove" so a single "Update /
+    # remove" action covers both editing and deleting a line (the CART screen is
+    # capped at 2 EmbeddedLinks, so remove can't be its own row). set_qty already
+    # deletes the line when the new quantity is 0.
+    cart_qty_options = [{"id": "0", "title": "0 — remove"}] + _qty_options(_MAX_QTY)
     return _resp(
         "CART",
         {
             "cart_text": summary,
             "has_items": bool(items),
             "lines": lines or [{"id": "", "title": "Cart is empty"}],
-            "qty_options": _qty_options(_MAX_QTY),
+            "qty_options": cart_qty_options,
         },
     )
 
@@ -300,7 +305,8 @@ async def _dispatch(payload: dict[str, Any]) -> dict[str, Any]:
                 new_qty = 0
             current = next((i["quantity"] for i in cart.get_items(sender) if i["product_id"] == product_id), 0)
             cart.update_quantity(sender, product_id, new_qty - current)
-            return _cart_screen(sender, cfg, flash="Quantity updated.")
+            flash = "Item removed." if new_qty <= 0 else "Quantity updated."
+            return _cart_screen(sender, cfg, flash=flash)
         if cart_action == "continue":
             return _categories_screen(sender, cfg)
         if cart_action == "checkout":

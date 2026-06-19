@@ -14,6 +14,43 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _flow_private_key() -> str:
+    """Load the WhatsApp Flow RSA private key, tolerating the many ways a PEM can
+    get mangled when pasted into a single-line env var (Render dashboard, .env):
+
+    * surrounding single/double quotes,
+    * literal ``\\n`` / ``\\r\\n`` escapes that were never turned into newlines,
+    * a base64-encoded PEM (no ``BEGIN`` marker) — decoded transparently,
+    * stray leading/trailing whitespace.
+
+    The goal is that the same key works whether it was pasted as a real
+    multi-line value or as an escaped one-liner."""
+    raw = os.getenv("WHATSAPP_FLOW_PRIVATE_KEY", "")
+    if not raw.strip():
+        return ""
+    raw = raw.strip()
+    # Strip one layer of matching surrounding quotes.
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        raw = raw[1:-1]
+    # Allow a base64-encoded PEM (avoids all newline/escaping issues entirely).
+    if "BEGIN" not in raw:
+        try:
+            import base64
+
+            decoded = base64.b64decode(raw, validate=False).decode("utf-8")
+            if "BEGIN" in decoded:
+                raw = decoded
+        except Exception:
+            pass
+    # Turn literal escape sequences into real newlines (handles single- and
+    # double-escaped values, e.g. "\\n" and "\\\\n").
+    if "BEGIN" in raw and "\n" not in raw:
+        raw = raw.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+    # Drop any stray backslashes left clinging to line boundaries.
+    raw = raw.replace("\\\n", "\n").replace("\n\\", "\n")
+    return raw.strip() + "\n"
+
+
 @dataclass(frozen=True)
 class Settings:
     meta_access_token: str
@@ -93,7 +130,8 @@ settings = Settings(
     whatsapp_checkout_flow_id=os.getenv("WHATSAPP_CHECKOUT_FLOW_ID", ""),
     public_base_url=os.getenv("PUBLIC_BASE_URL", ""),
     whatsapp_store_flow_id=os.getenv("WHATSAPP_STORE_FLOW_ID", ""),
-    # PEM string; tolerate \n-escaped values copied into a single-line env var.
-    whatsapp_flow_private_key=os.getenv("WHATSAPP_FLOW_PRIVATE_KEY", "").replace("\\n", "\n"),
+    # PEM string; normalised by _flow_private_key() to tolerate quoting, escaped
+    # \n, base64, and stray backslashes from single-line env vars.
+    whatsapp_flow_private_key=_flow_private_key(),
     whatsapp_flow_private_key_passphrase=os.getenv("WHATSAPP_FLOW_PRIVATE_KEY_PASSPHRASE", ""),
 )
