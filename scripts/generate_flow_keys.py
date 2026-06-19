@@ -29,6 +29,10 @@ import argparse
 import os
 import sys
 
+# Make the backend package root importable when run directly as a script
+# (needed by --register-existing, which imports app.services.sales.flow_crypto).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -74,10 +78,36 @@ def register_public_key(public_pem: str) -> None:
     )
 
 
+def register_existing_key() -> None:
+    """Register the public key derived from the EXISTING WHATSAPP_FLOW_PRIVATE_KEY
+    (read from .env via app config). Use this when you already have a working
+    private key configured and just need WhatsApp to hold the matching public key
+    — it guarantees the pair matches and avoids any shell/quoting issues."""
+    # Importing flow_crypto loads app config, which loads .env.
+    from app.services.sales import flow_crypto
+
+    if not flow_crypto.is_configured():
+        sys.exit("WHATSAPP_FLOW_PRIVATE_KEY is not set in the environment/.env.")
+    public_pem = flow_crypto.public_key_pem()
+    print("Derived public key from WHATSAPP_FLOW_PRIVATE_KEY:")
+    print(public_pem)
+    register_public_key(public_pem)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate/register the Flow encryption keypair.")
-    parser.add_argument("--register", action="store_true", help="Upload the public key to WhatsApp.")
+    parser.add_argument("--register", action="store_true", help="Generate a NEW keypair and upload its public key.")
+    parser.add_argument(
+        "--register-existing",
+        action="store_true",
+        help="Upload the public key matching the EXISTING WHATSAPP_FLOW_PRIVATE_KEY (no new keypair).",
+    )
     args = parser.parse_args()
+
+    # Register the already-configured key without generating a new pair.
+    if args.register_existing:
+        register_existing_key()
+        return
 
     private_pem, public_pem = generate_keypair()
 
