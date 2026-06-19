@@ -244,21 +244,31 @@ def _cart_screen(sender: str, cfg: dict[str, Any], flash: str = "") -> dict[str,
     for i in items:
         line_total = i["unit_price_minor"] * i["quantity"]
         subtotal += line_total
+        pid = str(i.get("product_id") or "")
+        # Product line — intentionally inert: tapping it does nothing (it just
+        # re-renders the same cart). No navigation to the product page.
         item: dict[str, Any] = {
-            "id": str(i.get("product_id") or ""),
+            "id": pid or f"item_{len(cart_items)}",
             "main-content": {
                 "title": i.get("name") or "Item",
                 "description": f"Qty {i.get('quantity')}",
                 "metadata": m.format_money(line_total, cfg["currency"]),
             },
-            # No payload → tapping a line just re-renders the cart (self), never a
-            # backward jump to the product page.
             "on-click-action": {"name": "data_exchange", "payload": {}},
         }
         thumb = thumbs.get(i.get("image_url") or "")
         if thumb:
             item["start"] = {"image": thumb, "alt-text": i.get("name") or "Item"}
         cart_items.append(item)
+        # Dedicated "remove from cart" control for this line.
+        cart_items.append(
+            _nav_item(
+                f"rm_{pid}",
+                f"❌ Remove {i.get('name') or 'item'}",
+                {"cart_action": "remove", "product_id": pid},
+                metadata="Remove from cart",
+            )
+        )
 
     if items:
         shipping = orders._compute_shipping(subtotal, cfg)
@@ -457,8 +467,13 @@ async def _dispatch(payload: dict[str, Any]) -> dict[str, Any]:
         cart_action = (data.get("cart_action") or "").strip().lower()
         if cart_action == "checkout":
             return await _checkout_screen(sender, cfg, flow_token)
-        # Any other CART tap (line item, empty placeholder) just refreshes the
-        # cart — there are no backward routes out of CART (only ADDRESS/SUCCESS).
+        if cart_action == "remove":
+            pid = (data.get("product_id") or "").strip()
+            if pid:
+                cart.remove_item(sender, pid)
+            return _cart_screen(sender, cfg, flash="Removed from cart.")
+        # Any other CART tap (inert line item) just refreshes the cart — there are
+        # no backward routes out of CART (only ADDRESS/SUCCESS).
         return _cart_screen(sender, cfg)
 
     if screen == "TRACK_ORDER":
