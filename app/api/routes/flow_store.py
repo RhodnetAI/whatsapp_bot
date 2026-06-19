@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.core.config import settings
 from app.services.sales import catalog, cart, orders
-from app.services.sales import flow_crypto
+from app.services.sales import flow_crypto, flow_images
 from app.services.sales import messaging as m
 from app.services.sales.handler import load_sales_config
 
@@ -39,6 +39,9 @@ router = APIRouter(tags=["sales-flow"])
 
 DATA_API_VERSION = "3.0"
 _MAX_QTY = 10  # cap the quantity stepper / dropdown options
+# Cap products per PRODUCTS screen — each carries a base64 thumbnail, and the
+# whole Flow response payload must stay under WhatsApp's 1 MB limit.
+_MAX_PRODUCTS = 10
 
 
 # ── Screen-data helpers ──────────────────────────────────────────────────────
@@ -70,34 +73,74 @@ def _stock_label(row: dict[str, Any]) -> str:
     return f"In stock: {int(stock)}" if int(stock) > 0 else "Out of stock"
 
 
+def _clip(text: Any, limit: int) -> str:
+    s = str(text or "").strip()
+    return s if len(s) <= limit else s[: limit - 1].rstrip() + "…"
+
+
+def _nav_item(
+    item_id: str,
+    title: str,
+    payload: dict[str, Any],
+    *,
+    metadata: str | None = None,
+    description: str | None = None,
+    image_b64: str | None = None,
+) -> dict[str, Any]:
+    """One ``NavigationList`` item. WhatsApp caps title=30, description=20,
+    metadata=80 chars; ``start.image`` is a base64 thumbnail (≤100 KB) and is
+    omitted when unavailable. Each item carries its own data_exchange action."""
+    main: dict[str, Any] = {"title": _clip(title, 30)}
+    if description:
+        main["description"] = _clip(description, 20)
+    if metadata:
+        main["metadata"] = _clip(metadata, 80)
+    item: dict[str, Any] = {
+        "id": str(item_id),
+        "main-content": main,
+        "on-click-action": {"name": "data_exchange", "payload": payload},
+    }
+    if image_b64:
+        item["start"] = {"image": image_b64, "alt-text": _clip(title, 30)}
+    return item
+
+
 # ── Screen builders ──────────────────────────────────────────────────────────
 def _categories_screen(sender: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    """CATEGORIES is a NavigationList-only screen (the component must occupy the
+    screen alone), so the cart link is appended as a list item."""
     cats = catalog.get_categories()
     count = sum(i["quantity"] for i in cart.get_items(sender)) if sender else 0
-    return _resp(
-        "CATEGORIES",
-        {
-            "categories": [{"id": c, "title": c} for c in cats] or [{"id": "", "title": "No categories yet"}],
-            "has_categories": bool(cats),
-            "cart_label": f"🛒 View cart ({count})" if count else "🛒 View cart",
-        },
-    )
+    items = [_nav_item(c, c, {"category": c}) for c in cats]
+    cart_title = f"🛒 View cart ({count})" if count else "🛒 View cart"
+    items.append(_nav_item("__cart__", cart_title, {"nav": "cart"}, metadata="Review & checkout"))
+    if not cats:
+        items.insert(0, _nav_item("__none__", "No products yet", {"nav": "categories"}, metadata="Check back soon"))
+    return _resp("CATEGORIES", {"categories": items})
 
 
 def _products_screen(category: str, cfg: dict[str, Any]) -> dict[str, Any]:
-    rows = catalog.get_products_by_category(category)
-    products: list[dict[str, str]] = []
+    """PRODUCTS is a NavigationList-only screen: product rows carry a base64
+    thumbnail + price/stock, and cart / back links are appended as list items."""
+    rows = catalog.get_products_by_category(category)[:_MAX_PRODUCTS]
+    thumbs = flow_images.thumbnails_b64([r.get("image_url") or "" for r in rows])
+    items: list[dict[str, Any]] = []
     for r in rows:
-        desc = f"{_price_str(r, cfg)} · {_stock_label(r)}"
-        products.append({"id": str(r["id"]), "title": (r.get("name") or "Item")[:30], "description": desc[:72]})
-    return _resp(
-        "PRODUCTS",
-        {
-            "category": category or "Products",
-            "products": products or [{"id": "", "title": "No products", "description": "Try another category"}],
-            "has_products": bool(products),
-        },
-    )
+        meta = f"{_price_str(r, cfg)} · {_stock_label(r)}"
+        items.append(
+            _nav_item(
+                str(r["id"]),
+                r.get("name") or "Item",
+                {"product_id": str(r["id"])},
+                metadata=meta,
+                image_b64=thumbs.get(r.get("image_url") or "") or None,
+            )
+        )
+    if not rows:
+        items.append(_nav_item("__empty__", "No products here", {"nav": "categories"}, metadata="Try another category"))
+    items.append(_nav_item("__cart__", "🛒 View cart", {"nav": "cart"}, metadata="Review & checkout"))
+    items.append(_nav_item("__cats__", "📋 Back to categories", {"nav": "categories"}, metadata="Browse other categories"))
+    return _resp("PRODUCTS", {"products": items})
 
 
 def _product_detail_screen(product_id: str, cfg: dict[str, Any]) -> dict[str, Any]:
@@ -117,6 +160,8 @@ def _product_detail_screen(product_id: str, cfg: dict[str, Any]) -> dict[str, An
             "description": (row.get("description") or "").strip() or "—",
             "stock_label": _stock_label(row),
             "in_stock": in_stock,
+            # Always a valid base64 JPEG (placeholder when the product has no image).
+            "image": flow_images.detail_b64(row.get("image_url") or ""),
             "qty_options": _qty_options(max_qty) if in_stock else [{"id": "1", "title": "1"}],
         },
     )
