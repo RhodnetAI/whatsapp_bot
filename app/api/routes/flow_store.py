@@ -154,9 +154,10 @@ def _categories_screen(sender: str, cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def _product_list_screen(rows: list[dict[str, Any]], cfg: dict[str, Any], empty_hint: str) -> dict[str, Any]:
-    """Render a product NavigationList (image + name + price/rating) from rows,
-    with the cart/home/track shortcuts appended. Shared by category, featured,
-    new-arrivals and best-sellers views."""
+    """Render a product NavigationList (image + name + price/rating) from rows.
+    The PRODUCTS screen intentionally has no cart/home/track shortcuts — the
+    customer either taps a product or uses WhatsApp's native back arrow. Shared by
+    category, featured, new-arrivals and best-sellers views."""
     rows = rows[:_MAX_PRODUCTS]
     thumbs = flow_images.thumbnails_b64([r.get("image_url") or "" for r in rows])
     items: list[dict[str, Any]] = [
@@ -170,8 +171,9 @@ def _product_list_screen(rows: list[dict[str, Any]], cfg: dict[str, Any], empty_
         for r in rows
     ]
     if not items:
-        items.append(_nav_item("__empty__", "No products here", {"nav": "home"}, metadata=empty_hint))
-    items += _list_nav_items()
+        # No products → offer a route back to categories (PRODUCTS only routes to
+        # PRODUCT_DETAIL and CATEGORIES — see routing_model in store_flow.json).
+        items.append(_nav_item("__empty__", "Back to categories", {"nav": "categories"}, metadata=empty_hint))
     return _resp("PRODUCTS", {"products": items})
 
 
@@ -285,7 +287,20 @@ def _address_screen(order: dict[str, Any], cfg: dict[str, Any], notes: list[str]
     summary = f"Order {order['order_number']}\nTotal payable: {m.format_money(order['total_minor'], currency)}"
     if notes:
         summary = "\n".join(notes) + "\n\n" + summary
-    return _resp("ADDRESS", {"order_number": order["order_number"], "summary": summary})
+    # Re-use a previously entered address: pre-fill the form via init-value so the
+    # customer just confirms instead of re-typing. Empty strings when none on file.
+    saved = orders.last_shipping_for_sender(order.get("sender") or "") or {}
+    data = {
+        "order_number": order["order_number"],
+        "summary": summary,
+        "name": saved.get("name", ""),
+        "phone": saved.get("phone", ""),
+        "address": saved.get("address", ""),
+        "city": saved.get("city", ""),
+        "state": saved.get("state", ""),
+        "pincode": saved.get("pincode", ""),
+    }
+    return _resp("ADDRESS", data)
 
 
 async def _checkout_screen(sender: str, cfg: dict[str, Any]) -> dict[str, Any]:

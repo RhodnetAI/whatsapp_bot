@@ -169,6 +169,36 @@ def latest_order_for_sender(sender: str) -> dict[str, Any] | None:
     return first_row(res)
 
 
+def last_shipping_for_sender(sender: str) -> dict[str, Any] | None:
+    """Most recent saved delivery details for this sender, so the store Flow can
+    pre-fill the ADDRESS form instead of asking again. Returns a flat dict with
+    name/phone/address/city/state/pincode, or None if nothing on file."""
+    res = (
+        _db()
+        .table(ORDERS)
+        .select("customer_name, customer_phone, shipping_address")
+        .eq("sender", sender)
+        .not_.is_("shipping_address", "null")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    row = first_row(res)
+    if not row:
+        return None
+    addr = row.get("shipping_address")
+    if not isinstance(addr, dict) or not addr:
+        return None
+    return {
+        "name": row.get("customer_name") or "",
+        "phone": row.get("customer_phone") or "",
+        "address": addr.get("address") or "",
+        "city": addr.get("city") or "",
+        "state": addr.get("state") or "",
+        "pincode": str(addr.get("pincode") or ""),
+    }
+
+
 def mark_order_paid(order_id: str) -> dict[str, Any] | None:
     """Idempotency is enforced upstream by the unique sales_payments.event_id.
     Marks the order paid and decrements stock for its line items."""

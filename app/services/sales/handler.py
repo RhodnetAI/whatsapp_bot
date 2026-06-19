@@ -17,6 +17,7 @@ on the next message shows the main menu again. Tapping *Main menu* (or typing
 """
 
 import asyncio
+import collections
 import json
 import logging
 from datetime import datetime, timezone
@@ -39,6 +40,24 @@ WELCOME = "Welcome to Rhodnet AI, You can purchase all the products at any time.
 
 # How many product cards to render per category/search screen.
 _MAX_CARDS = 8
+
+# Idempotency guard: WhatsApp re-delivers webhook events on retry, which would
+# otherwise process a Flow completion (and re-send the payment link) twice. We
+# remember recently handled message_ids and ignore duplicates.
+_SEEN_MESSAGE_IDS: "collections.OrderedDict[str, None]" = collections.OrderedDict()
+_SEEN_MESSAGE_IDS_MAX = 2000
+
+
+def _already_handled(message_id: str | None) -> bool:
+    """True if this message_id was already processed (duplicate delivery)."""
+    if not isinstance(message_id, str) or not message_id:
+        return False
+    if message_id in _SEEN_MESSAGE_IDS:
+        return True
+    _SEEN_MESSAGE_IDS[message_id] = None
+    while len(_SEEN_MESSAGE_IDS) > _SEEN_MESSAGE_IDS_MAX:
+        _SEEN_MESSAGE_IDS.popitem(last=False)
+    return False
 
 
 def _db():
@@ -800,6 +819,12 @@ def _reset_sales_state(sender: str) -> None:
 
 # ── Public entry point ───────────────────────────────────────────────────────
 async def handle_sales_message(sender: str, message: dict[str, Any], message_id: str | None) -> None:
+    # Drop duplicate webhook deliveries (Meta retries) so a single Flow
+    # completion can't send the payment link twice.
+    if _already_handled(message_id):
+        logger.info("Sales: duplicate message_id=%s ignored for sender=%s", message_id, sender)
+        return
+
     db = _db()
 
     try:
