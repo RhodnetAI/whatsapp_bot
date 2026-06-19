@@ -200,20 +200,13 @@ def last_shipping_for_sender(sender: str) -> dict[str, Any] | None:
 
 
 def mark_order_paid(order_id: str) -> dict[str, Any] | None:
-    """Mark the order paid and decrement stock for its line items, returning the
-    updated order ONLY on the transition draft/pending → paid.
-
-    Returns ``None`` if the order is missing or was *already* paid. Razorpay sends
-    several distinct events for one payment (``payment.captured``,
-    ``payment_link.paid``, ``order.paid``), each with its own event_id — so the
-    sales_payments event_id idempotency does not collapse them. Returning None on
-    an already-paid order is what stops the buyer getting the confirmation message
-    twice (the webhook only notifies when this returns a row)."""
+    """Idempotency is enforced upstream by the unique sales_payments.event_id.
+    Marks the order paid and decrements stock for its line items."""
     order = get_order(order_id)
     if not order:
         return None
     if order.get("status") == "paid":
-        return None
+        return order
     _db().table(ORDERS).update({"status": "paid", "payment_status": "paid"}).eq("id", order_id).execute()
 
     for item in get_order_items(order_id):
