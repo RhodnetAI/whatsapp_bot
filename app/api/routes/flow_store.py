@@ -128,10 +128,12 @@ def _product_meta(row: dict[str, Any], cfg: dict[str, Any]) -> str:
 
 
 def _list_nav_items() -> list[dict[str, Any]]:
-    """Cart / Home / Track shortcuts appended to every browsing NavigationList."""
+    """Cart / Track shortcuts appended to the CATEGORIES NavigationList. These are
+    forward routes in the routing_model (CATEGORIES → CART / TRACK_ORDER). There is
+    no "Home" shortcut: returning to a previous screen is a backward route, which
+    WhatsApp forbids in the routing_model — the device's native back arrow does it."""
     return [
         _nav_item("__cart__", "🛒 Cart", {"nav": "cart"}, metadata="Review & checkout"),
-        _nav_item("__home__", "🏠 Home", {"nav": "home"}, metadata="Back to start"),
         _nav_item("__track__", "📦 Track order", {"nav": "track"}, metadata="Check an order"),
     ]
 
@@ -171,9 +173,9 @@ def _product_list_screen(rows: list[dict[str, Any]], cfg: dict[str, Any], empty_
         for r in rows
     ]
     if not items:
-        # No products → offer a route back to categories (PRODUCTS only routes to
-        # PRODUCT_DETAIL and CATEGORIES — see routing_model in store_flow.json).
-        items.append(_nav_item("__empty__", "Back to categories", {"nav": "categories"}, metadata=empty_hint))
+        # No products → a self-refreshing placeholder (empty payload). PRODUCTS has
+        # no backward route to CATEGORIES; the customer taps ← to go back.
+        items.append(_nav_item("__empty__", "No products here", {}, metadata=empty_hint + " · tap ← to go back"))
     return _resp("PRODUCTS", {"products": items})
 
 
@@ -194,8 +196,22 @@ def _featured_screen(kind: str, cfg: dict[str, Any]) -> dict[str, Any]:
 def _product_detail_screen(product_id: str, cfg: dict[str, Any]) -> dict[str, Any]:
     row = catalog.get_product(product_id)
     if not row:
-        # Product vanished/inactive — bounce back to categories.
-        return _categories_screen("", cfg)
+        # Product vanished/inactive. Show a placeholder on the SAME screen instead
+        # of bouncing to CATEGORIES (which would be a forbidden backward route);
+        # the customer taps ← to go back.
+        return _resp(
+            "PRODUCT_DETAIL",
+            {
+                "product_id": "",
+                "title": "Item unavailable",
+                "price": "—",
+                "rating": "",
+                "description": "This item is no longer available.",
+                "stock_label": "Out of stock",
+                "in_stock": False,
+                "image": flow_images.detail_b64(""),
+            },
+        )
     stock = row.get("stock_quantity")
     in_stock = stock is None or int(stock) > 0
     max_qty = _MAX_QTY if stock is None else int(stock)
@@ -216,8 +232,11 @@ def _product_detail_screen(product_id: str, cfg: dict[str, Any]) -> dict[str, An
 
 
 def _cart_screen(sender: str, cfg: dict[str, Any], flash: str = "") -> dict[str, Any]:
-    """Render the cart as an image-backed NavigationList with item details.
-    The CART screen then shows checkout and continue shopping rows as list items."""
+    """Render the cart as an image-backed NavigationList with item details, plus a
+    Checkout row. To keep shopping the customer uses the device's native back
+    arrow — "continue shopping" would be a backward route, which WhatsApp's
+    routing_model forbids. Cart line taps just refresh the cart (re-opening a
+    product page would also be a backward route)."""
     items = cart.get_items(sender)
     thumbs = flow_images.thumbnails_b64([i.get("image_url") or "" for i in items])
     cart_items: list[dict[str, Any]] = []
@@ -232,7 +251,9 @@ def _cart_screen(sender: str, cfg: dict[str, Any], flash: str = "") -> dict[str,
                 "description": f"Qty {i.get('quantity')}",
                 "metadata": m.format_money(line_total, cfg["currency"]),
             },
-            "on-click-action": {"name": "data_exchange", "payload": {"product_id": str(i.get("product_id") or "")}},
+            # No payload → tapping a line just re-renders the cart (self), never a
+            # backward jump to the product page.
+            "on-click-action": {"name": "data_exchange", "payload": {}},
         }
         thumb = thumbs.get(i.get("image_url") or "")
         if thumb:
@@ -251,10 +272,10 @@ def _cart_screen(sender: str, cfg: dict[str, Any], flash: str = "") -> dict[str,
             summary += f"\nShipping: {m.format_money(shipping, cfg['currency'])}"
         summary += f"\n*Total: {m.format_money(total, cfg['currency'])}*"
         cart_items.append(_nav_item("__checkout__", "Checkout", {"cart_action": "checkout"}, metadata="Continue to delivery"))
-        cart_items.append(_nav_item("__continue__", "Continue shopping", {"cart_action": "continue"}, metadata="Browse more products"))
     else:
-        summary = "Your cart is empty. Tap *Continue shopping* to add items."
-        cart_items = [_nav_item("__continue__", "Continue shopping", {"cart_action": "continue"}, metadata="Browse more products")]
+        summary = "Your cart is empty. Tap ← to keep shopping."
+        # A NavigationList needs at least one row; this one self-refreshes.
+        cart_items = [_nav_item("__empty__", "🛒 Cart is empty", {}, metadata="Tap ← to keep shopping")]
 
     if flash:
         summary = f"{flash}\n\n{summary}"
@@ -393,17 +414,15 @@ async def _dispatch(payload: dict[str, Any]) -> dict[str, Any]:
         # Defensive: client normally handles back-nav itself.
         return _categories_screen(sender, cfg)
 
-    # A "nav" shortcut can appear on any list screen — handle once, centrally.
+    # A "nav" shortcut from the CATEGORIES list — only forward routes
+    # (CATEGORIES → CART / TRACK_ORDER). Backward shortcuts (home/categories)
+    # aren't offered; the device back arrow handles going back.
     nav = (data.get("nav") or "").strip().lower()
     if nav:
         if nav == "cart":
             return _cart_screen(sender, cfg)
         if nav == "track":
             return _track_screen("", cfg)
-        if nav in ("home", "store_home"):
-            return _resp("STORE_HOME", {})
-        if nav in ("categories", "browse"):
-            return _categories_screen(sender, cfg)
 
     # action == "data_exchange" (or anything else) → route by screen + payload.
     if screen == "STORE_HOME":
@@ -436,13 +455,10 @@ async def _dispatch(payload: dict[str, Any]) -> dict[str, Any]:
 
     if screen == "CART":
         cart_action = (data.get("cart_action") or "").strip().lower()
-        if cart_action == "continue":
-            return _categories_screen(sender, cfg)
         if cart_action == "checkout":
             return await _checkout_screen(sender, cfg, flow_token)
-        product_id = (data.get("product_id") or "").strip()
-        if product_id:
-            return _product_detail_screen(product_id, cfg)
+        # Any other CART tap (line item, empty placeholder) just refreshes the
+        # cart — there are no backward routes out of CART (only ADDRESS/SUCCESS).
         return _cart_screen(sender, cfg)
 
     if screen == "TRACK_ORDER":
