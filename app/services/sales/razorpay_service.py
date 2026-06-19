@@ -18,7 +18,8 @@ def is_configured() -> bool:
     return bool(settings.razorpay_key_id and settings.razorpay_key_secret and razorpay is not None)
 
 
-def _client():
+def _client() -> Any:
+    assert razorpay is not None
     return razorpay.Client(auth=(settings.razorpay_key_id, settings.razorpay_key_secret))
 
 
@@ -58,7 +59,7 @@ def verify_webhook_signature(body: bytes, signature: str) -> bool:
     if razorpay is None or not settings.razorpay_webhook_secret or not signature:
         return False
     try:
-        client = razorpay.Client(
+        client: Any = razorpay.Client(
             auth=(settings.razorpay_key_id or "key", settings.razorpay_key_secret or "secret")
         )
         client.utility.verify_webhook_signature(

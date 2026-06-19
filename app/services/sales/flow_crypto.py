@@ -27,6 +27,7 @@ from typing import Any
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from app.core.config import settings
@@ -46,15 +47,18 @@ def is_configured() -> bool:
     return bool(settings.whatsapp_flow_private_key.strip())
 
 
-def _load_private_key():
+def _load_private_key() -> RSAPrivateKey:
     pem = settings.whatsapp_flow_private_key.strip()
     if not pem:
         raise FlowEncryptionError("WHATSAPP_FLOW_PRIVATE_KEY is not configured")
     passphrase = settings.whatsapp_flow_private_key_passphrase or None
-    return serialization.load_pem_private_key(
+    key = serialization.load_pem_private_key(
         pem.encode("utf-8"),
         password=passphrase.encode("utf-8") if passphrase else None,
     )
+    if not isinstance(key, RSAPrivateKey):
+        raise FlowEncryptionError("Flow private key must be an RSA key")
+    return key
 
 
 def decrypt_request(body: dict[str, Any]) -> tuple[dict[str, Any], bytes, bytes]:
