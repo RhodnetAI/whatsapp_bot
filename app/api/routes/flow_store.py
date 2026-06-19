@@ -338,6 +338,21 @@ async def _dispatch(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 # ── Route ────────────────────────────────────────────────────────────────────
+@router.get("/flows/store/public-key")
+async def store_public_key():
+    """Diagnostic: returns the public key derived from the private key the server
+    has actually loaded. Upload exactly this to WhatsApp
+    (``POST /{phone-number-id}/whatsapp_business_encryption``) so the registered
+    public key is guaranteed to match. Public keys are not secret."""
+    if not flow_crypto.is_configured():
+        return JSONResponse({"error": "WHATSAPP_FLOW_PRIVATE_KEY not configured"}, status_code=500)
+    try:
+        return PlainTextResponse(content=flow_crypto.public_key_pem(), status_code=200)
+    except Exception:
+        logger.exception("Store Flow: could not derive public key from private key")
+        return JSONResponse({"error": "could not load private key (check the PEM)"}, status_code=500)
+
+
 @router.post("/flows/store/data-exchange")
 async def store_data_exchange(request: Request):
     """Encrypted WhatsApp Flow data-exchange endpoint (separate from ``/webhook``)."""

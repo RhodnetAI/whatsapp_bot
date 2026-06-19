@@ -61,6 +61,18 @@ def _load_private_key() -> RSAPrivateKey:
     return key
 
 
+def public_key_pem() -> str:
+    """Derive the PEM public key from the configured private key. Used by the
+    ``GET /flows/store/public-key`` diagnostic so the exact key to register with
+    WhatsApp can be read straight off the running server (public keys are not
+    secret), removing any doubt about which private key is actually loaded."""
+    key = _load_private_key()
+    return key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("utf-8")
+
+
 def decrypt_request(body: dict[str, Any]) -> tuple[dict[str, Any], bytes, bytes]:
     """Decrypt an inbound Flow data-exchange request.
 
