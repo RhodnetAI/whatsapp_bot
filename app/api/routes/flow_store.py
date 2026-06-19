@@ -287,25 +287,38 @@ def _address_screen(order: dict[str, Any], cfg: dict[str, Any], notes: list[str]
     summary = f"Order {order['order_number']}\nTotal payable: {m.format_money(order['total_minor'], currency)}"
     if notes:
         summary = "\n".join(notes) + "\n\n" + summary
-    # Re-use a previously entered address: pre-fill the form via init-value so the
-    # customer just confirms instead of re-typing. Empty strings when none on file.
-    saved = orders.last_shipping_for_sender(order.get("sender") or "") or {}
-    data = {
-        "order_number": order["order_number"],
-        "summary": summary,
-        "name": saved.get("name", ""),
-        "phone": saved.get("phone", ""),
-        "address": saved.get("address", ""),
-        "city": saved.get("city", ""),
-        "state": saved.get("state", ""),
-        "pincode": saved.get("pincode", ""),
-    }
-    return _resp("ADDRESS", data)
+    return _resp("ADDRESS", {"order_number": order["order_number"], "summary": summary})
 
 
-async def _checkout_screen(sender: str, cfg: dict[str, Any]) -> dict[str, Any]:
-    """Create a draft order from the cart and move to the ADDRESS screen — same
-    server-side stock-check/totals logic the chat checkout uses."""
+def _checkout_or_address(order: dict[str, Any], cfg: dict[str, Any], notes: list[str], flow_token: str) -> dict[str, Any]:
+    """After an order is created, decide where to send the customer:
+
+    * If we already have a saved delivery address for this sender, re-use it
+      (apply it to the order server-side) and skip straight to SUCCESS — the
+      customer never re-enters details for repeat orders.
+    * Otherwise show the ADDRESS form to collect them.
+    """
+    saved = orders.last_shipping_for_sender(order.get("sender") or "")
+    if saved:
+        orders.set_customer_details(
+            order["id"],
+            saved.get("name") or "Customer",
+            saved.get("phone") or (order.get("sender") or ""),
+            {
+                "address": saved.get("address", ""),
+                "city": saved.get("city", ""),
+                "state": saved.get("state", ""),
+                "pincode": saved.get("pincode", ""),
+            },
+        )
+        return _success_screen(order, order["order_number"], flow_token, cfg)
+    return _address_screen(order, cfg, notes)
+
+
+async def _checkout_screen(sender: str, cfg: dict[str, Any], flow_token: str) -> dict[str, Any]:
+    """Create a draft order from the cart and move to delivery — same
+    server-side stock-check/totals logic the chat checkout uses. Returning
+    customers with a saved address skip the form (see ``_checkout_or_address``)."""
     items = cart.get_items(sender)
     if not items:
         return _cart_screen(sender, cfg, flash="Your cart is empty.")
@@ -314,16 +327,17 @@ async def _checkout_screen(sender: str, cfg: dict[str, Any]) -> dict[str, Any]:
     if not order:
         return _cart_screen(sender, cfg, flash="None of your cart items are available anymore.")
     cart.mark_checked_out(sender)
-    return _address_screen(order, cfg, notes)
+    return _checkout_or_address(order, cfg, notes, flow_token)
 
 
-def _buy_now_screen(sender: str, product_id: str, qty: int, cfg: dict[str, Any]) -> dict[str, Any]:
-    """'Buy Now' — create a single-item order and go straight to ADDRESS,
-    bypassing the cart (the cart is left untouched)."""
+def _buy_now_screen(sender: str, product_id: str, qty: int, cfg: dict[str, Any], flow_token: str) -> dict[str, Any]:
+    """'Buy Now' — create a single-item order and go straight to delivery,
+    bypassing the cart (the cart is left untouched). Returning customers with a
+    saved address skip the form (see ``_checkout_or_address``)."""
     order, notes = orders.create_order(sender, [{"product_id": product_id, "quantity": qty}], cfg)
     if not order:
         return _product_detail_screen(product_id, cfg)
-    return _address_screen(order, cfg, notes)
+    return _checkout_or_address(order, cfg, notes, flow_token)
 
 
 def _success_screen(order: dict[str, Any] | None, order_number: str, flow_token: str, cfg: dict[str, Any]) -> dict[str, Any]:
@@ -415,7 +429,7 @@ async def _dispatch(payload: dict[str, Any]) -> dict[str, Any]:
         except (TypeError, ValueError):
             qty = 1
         if (data.get("action") or "").strip().lower() == "buy_now":
-            return _buy_now_screen(sender, product_id, qty, cfg)
+            return _buy_now_screen(sender, product_id, qty, cfg, flow_token)
         ok = cart.add_item(sender, product_id, qty)
         flash = "✓ Added to cart." if ok else "Sorry, that item isn't available."
         return _cart_screen(sender, cfg, flash=flash)
@@ -425,7 +439,7 @@ async def _dispatch(payload: dict[str, Any]) -> dict[str, Any]:
         if cart_action == "continue":
             return _categories_screen(sender, cfg)
         if cart_action == "checkout":
-            return await _checkout_screen(sender, cfg)
+            return await _checkout_screen(sender, cfg, flow_token)
         product_id = (data.get("product_id") or "").strip()
         if product_id:
             return _product_detail_screen(product_id, cfg)
