@@ -57,6 +57,11 @@ def _sender_from_token(flow_token: str) -> str:
     return token
 
 
+def _qty_options(maximum: int) -> list[dict[str, str]]:
+    top = max(1, min(int(maximum or _MAX_QTY), _MAX_QTY))
+    return [{"id": str(n), "title": str(n)} for n in range(1, top + 1)]
+
+
 def _price_str(row: dict[str, Any], cfg: dict[str, Any]) -> str:
     return m.format_money(row.get("price_minor") or 0, row.get("currency") or cfg["currency"])
 
@@ -184,15 +189,14 @@ def _featured_screen(kind: str, cfg: dict[str, Any]) -> dict[str, Any]:
     return _product_list_screen(rows, cfg, "Nothing here yet")
 
 
-def _product_detail_screen(product_id: str, cfg: dict[str, Any], qty: int = 1) -> dict[str, Any]:
+def _product_detail_screen(product_id: str, cfg: dict[str, Any]) -> dict[str, Any]:
     row = catalog.get_product(product_id)
     if not row:
         # Product vanished/inactive — bounce back to categories.
         return _categories_screen("", cfg)
     stock = row.get("stock_quantity")
     in_stock = stock is None or int(stock) > 0
-    max_qty = _MAX_QTY if stock is None else max(1, int(stock))
-    qty = max(1, min(int(qty or 1), max_qty))  # clamp the +/- stepper
+    max_qty = _MAX_QTY if stock is None else int(stock)
     return _resp(
         "PRODUCT_DETAIL",
         {
@@ -205,76 +209,54 @@ def _product_detail_screen(product_id: str, cfg: dict[str, Any], qty: int = 1) -
             "in_stock": in_stock,
             # Always a valid base64 JPEG (placeholder when the product has no image).
             "image": flow_images.detail_b64(row.get("image_url") or ""),
-            "qty": str(qty),
-            "qty_label": f"Quantity: {qty}",
         },
     )
 
 
 def _cart_screen(sender: str, cfg: dict[str, Any], flash: str = "") -> dict[str, Any]:
-    """Cart as a NavigationList so each line shows an image + name + qty + price.
-    A NavigationList must own the screen, so the Total / Checkout / Continue
-    controls are appended as list rows too (the Total row is non-navigating)."""
+    """Render the cart as an image-backed NavigationList with item details.
+    The CART screen then shows checkout and continue shopping rows as list items."""
     items = cart.get_items(sender)
     thumbs = flow_images.thumbnails_b64([i.get("image_url") or "" for i in items])
-    lines: list[dict[str, Any]] = []
+    cart_items: list[dict[str, Any]] = []
     subtotal = 0
     for i in items:
         line_total = i["unit_price_minor"] * i["quantity"]
         subtotal += line_total
-        lines.append(
-            _nav_item(
-                str(i["product_id"]),
-                i["name"],
-                {"product_id": str(i["product_id"])},  # tap a line → reopen product
-                metadata=f"×{i['quantity']} · {m.format_money(line_total, cfg['currency'])}",
-                image_b64=thumbs.get(i.get("image_url") or "") or None,
-            )
+        item: dict[str, Any] = {
+            "id": str(i.get("product_id") or ""),
+            "main-content": {
+                "title": i.get("name") or "Item",
+                "description": f"Qty {i.get('quantity')}",
+                "metadata": m.format_money(line_total, cfg["currency"]),
+            },
+            "on-click-action": {"name": "data_exchange", "payload": {"product_id": str(i.get("product_id") or "")}},
+        }
+        thumb = thumbs.get(i.get("image_url") or "")
+        if thumb:
+            item["start"] = {"image": thumb, "alt-text": i.get("name") or "Item"}
+        cart_items.append(item)
+
+    if items:
+        shipping = orders._compute_shipping(subtotal, cfg)
+        total = subtotal + shipping
+        summary = "\n".join(
+            f"• {i['name']} ×{i['quantity']} — {m.format_money(i['unit_price_minor'] * i['quantity'], cfg['currency'])}"
+            for i in items
         )
+        summary += f"\n\nSubtotal: {m.format_money(subtotal, cfg['currency'])}"
+        if shipping:
+            summary += f"\nShipping: {m.format_money(shipping, cfg['currency'])}"
+        summary += f"\n*Total: {m.format_money(total, cfg['currency'])}*"
+        cart_items.append(_nav_item("__checkout__", "Checkout", {"cart_action": "checkout"}, metadata="Continue to delivery"))
+        cart_items.append(_nav_item("__continue__", "Continue shopping", {"cart_action": "continue"}, metadata="Browse more products"))
+    else:
+        summary = "Your cart is empty. Tap *Continue shopping* to add items."
+        cart_items = [_nav_item("__continue__", "Continue shopping", {"cart_action": "continue"}, metadata="Browse more products")]
 
-    if not items:
-        lines.append(_nav_item("__empty__", "Your cart is empty", {"cart_action": "continue"}, metadata="Tap to shop"))
-        lines.append(_nav_item("__shop__", "📋 Continue shopping", {"cart_action": "continue"}))
-        return _resp("CART", {"lines": lines})
-
-    shipping = orders._compute_shipping(subtotal, cfg)
-    total = subtotal + shipping
-    total_meta = m.format_money(total, cfg["currency"])
-    if shipping:
-        total_meta += f" (incl. {m.format_money(shipping, cfg['currency'])} shipping)"
-    lines.append(_nav_item("__total__", "🧾 Total", {"cart_action": "view"}, metadata=total_meta))
-    lines.append(_nav_item("__checkout__", "✅ Checkout", {"cart_action": "checkout"}, metadata="Proceed to delivery & payment"))
-    lines.append(_nav_item("__shop__", "📋 Continue shopping", {"cart_action": "continue"}, metadata="Add more items"))
     if flash:
-        lines.insert(0, _nav_item("__flash__", flash[:30], {"cart_action": "view"}))
-    return _resp("CART", {"lines": lines})
-
-
-def _search_screen(query: str, cfg: dict[str, Any]) -> dict[str, Any]:
-    """Search by category or product name. A category match narrows the category
-    list; otherwise matching products are shown. Empty query → all categories."""
-    q = (query or "").strip().lower()
-    if not q:
-        return _categories_screen("", cfg)
-    rows = catalog.fetch_active_rows()
-    matching_cats = [c for c in catalog.get_categories() if q in c.lower()]
-    if matching_cats:
-        # Show the matching categories (tap → that category's products).
-        counts: dict[str, int] = {}
-        for r in rows:
-            c = (r.get("category") or "").strip() or "Other"
-            counts[c] = counts.get(c, 0) + 1
-        items = [
-            _nav_item(c, c, {"category": c}, metadata=f"{counts.get(c, 0)} product(s)")
-            for c in matching_cats
-        ]
-        items += _list_nav_items()
-        return _resp("CATEGORIES", {"categories": items})
-    matches = [
-        r for r in rows
-        if q in f"{r.get('name','')} {r.get('category','')} {r.get('description','')}".lower()
-    ]
-    return _product_list_screen(matches, cfg, f"No matches for that search")
+        summary = f"{flash}\n\n{summary}"
+    return _resp("CART", {"summary": summary, "cart_items": cart_items})
 
 
 def _track_screen(order_number: str, cfg: dict[str, Any]) -> dict[str, Any]:
@@ -401,14 +383,9 @@ async def _dispatch(payload: dict[str, Any]) -> dict[str, Any]:
             return _cart_screen(sender, cfg)
         if intent == "track":
             return _track_screen("", cfg)
-        if intent == "search":
-            return _resp("SEARCH", {})
         if intent in ("new", "best"):
             return _featured_screen(intent, cfg)
         return _categories_screen(sender, cfg)  # default: browse / categories
-
-    if screen == "SEARCH":
-        return _search_screen(data.get("query") or "", cfg)
 
     if screen == "CATEGORIES":
         return _products_screen(data.get("category") or "", cfg)
@@ -422,12 +399,7 @@ async def _dispatch(payload: dict[str, Any]) -> dict[str, Any]:
             qty = max(1, int(data.get("qty") or 1))
         except (TypeError, ValueError):
             qty = 1
-        act = (data.get("action") or "").strip().lower()
-        if act == "qty_inc":
-            return _product_detail_screen(product_id, cfg, qty + 1)
-        if act == "qty_dec":
-            return _product_detail_screen(product_id, cfg, qty - 1)
-        if act == "buy_now":
+        if (data.get("action") or "").strip().lower() == "buy_now":
             return _buy_now_screen(sender, product_id, qty, cfg)
         ok = cart.add_item(sender, product_id, qty)
         flash = "✓ Added to cart." if ok else "Sorry, that item isn't available."
@@ -439,9 +411,8 @@ async def _dispatch(payload: dict[str, Any]) -> dict[str, Any]:
             return _categories_screen(sender, cfg)
         if cart_action == "checkout":
             return await _checkout_screen(sender, cfg)
-        # Tapping a cart line (carries product_id, no cart_action) reopens it.
-        product_id = data.get("product_id") or ""
-        if not cart_action and product_id:
+        product_id = (data.get("product_id") or "").strip()
+        if product_id:
             return _product_detail_screen(product_id, cfg)
         return _cart_screen(sender, cfg)
 
