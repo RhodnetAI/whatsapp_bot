@@ -102,6 +102,7 @@ def get_items(sender: str) -> list[dict[str, Any]]:
                 "quantity": int(item.get("quantity") or 1),
                 "unit_price_minor": int(product.get("price_minor") or item.get("unit_price_minor") or 0),
                 "stock_quantity": product.get("stock_quantity"),
+                "image_url": product.get("image_url") or "",
             }
         )
     return out

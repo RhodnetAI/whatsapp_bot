@@ -187,10 +187,11 @@ def flow(
 def store_flow(
     flow_id: str,
     sender: str,
-    body: str = "Tap below to open the store — browse, manage your cart, track an order, and checkout, all in one place.",
+    body: str = "Tap below to open the store — browse, manage your cart, track an order, and checkout.",
     cta_text: str = "🏬 Open Store",
     header_text: str | None = "Open Store",
     mode: str | None = None,
+    
 ) -> dict:
     """The "Open Store" data-exchange Flow message (Path B).
 
