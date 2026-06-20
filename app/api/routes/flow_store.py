@@ -39,9 +39,14 @@ router = APIRouter(tags=["sales-flow"])
 
 DATA_API_VERSION = "3.0"
 _MAX_QTY = 10  # cap the quantity stepper / dropdown options
-# Cap products per PRODUCTS screen — each carries a base64 thumbnail, and the
-# whole Flow response payload must stay under WhatsApp's 1 MB limit.
-_MAX_PRODUCTS = 10
+# Page sizes for the NavigationList screens. A NavigationList holds at most 20
+# items, and each PRODUCTS row carries a base64 thumbnail (the whole Flow
+# response must stay under WhatsApp's 1 MB limit) — so we show one page at a
+# time and append a "Show more" row that re-fetches the next page via
+# data_exchange. This lets a category hold hundreds/thousands of products
+# without silently truncating them.
+_PRODUCTS_PAGE = 8     # products per PRODUCTS page (+1 "Show more" row ≤ 20)
+_CATEGORIES_PAGE = 16  # categories per page (+ "Show more" + 2 shortcuts ≤ 20)
 
 
 # ── Screen-data helpers ──────────────────────────────────────────────────────
@@ -60,6 +65,14 @@ def _sender_from_token(flow_token: str) -> str:
 def _qty_options(maximum: int) -> list[dict[str, str]]:
     top = max(1, min(int(maximum or _MAX_QTY), _MAX_QTY))
     return [{"id": str(n), "title": str(n)} for n in range(1, top + 1)]
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    """Parse a pagination ``offset`` (sent back as a string in the click payload)."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def _price_str(row: dict[str, Any], cfg: dict[str, Any]) -> str:
@@ -138,30 +151,52 @@ def _list_nav_items() -> list[dict[str, Any]]:
     ]
 
 
-def _categories_screen(sender: str, cfg: dict[str, Any]) -> dict[str, Any]:
-    """Category cards with a product count, plus the cart/home/track shortcuts."""
+def _categories_screen(sender: str, cfg: dict[str, Any], offset: int = 0) -> dict[str, Any]:
+    """Category cards with a product count, plus the cart/track shortcuts.
+    Paginated: when there are more categories than fit on one page, a
+    "Show more categories" row re-fetches the next page (same screen) — so a
+    catalog with many categories isn't truncated."""
     rows = catalog.fetch_active_rows()
     counts: dict[str, int] = {}
     for r in rows:
         c = (r.get("category") or "").strip() or "Other"
         counts[c] = counts.get(c, 0) + 1
+    all_categories = catalog.get_categories()
+    page = all_categories[offset:offset + _CATEGORIES_PAGE]
     items = [
         _nav_item(c, c, {"category": c}, metadata=f"{counts.get(c, 0)} product(s)")
-        for c in catalog.get_categories()
+        for c in page
     ]
-    if not items:
+    if not all_categories:
         items.append(_nav_item("__none__", "No products yet", {"category": ""}, metadata="Check back soon"))
+    remaining = len(all_categories) - (offset + _CATEGORIES_PAGE)
+    if remaining > 0:
+        items.append(_nav_item(
+            "__more_cats__", "⬇️ Show more categories",
+            {"nav": "more", "offset": str(offset + _CATEGORIES_PAGE)},
+            metadata=f"{remaining} more",
+        ))
     items += _list_nav_items()
     return _resp("CATEGORIES", {"categories": items})
 
 
-def _product_list_screen(rows: list[dict[str, Any]], cfg: dict[str, Any], empty_hint: str) -> dict[str, Any]:
+def _product_list_screen(
+    rows: list[dict[str, Any]],
+    cfg: dict[str, Any],
+    empty_hint: str,
+    more_base: dict[str, Any] | None = None,
+    offset: int = 0,
+) -> dict[str, Any]:
     """Render a product NavigationList (image + name + price/rating) from rows.
-    The PRODUCTS screen intentionally has no cart/home/track shortcuts — the
-    customer either taps a product or uses WhatsApp's native back arrow. Shared by
-    category, featured, new-arrivals and best-sellers views."""
-    rows = rows[:_MAX_PRODUCTS]
-    thumbs = flow_images.thumbnails_b64([r.get("image_url") or "" for r in rows])
+    Paginated: shows ``_PRODUCTS_PAGE`` rows starting at ``offset``; when more
+    remain, a "Show more" row (carrying ``more_base`` + the next offset)
+    re-fetches the next page on the same screen — so a category with hundreds of
+    products isn't truncated. The PRODUCTS screen has no cart/home/track
+    shortcuts; the customer taps a product, "Show more", or the native back
+    arrow. Shared by category, new-arrivals and best-sellers views."""
+    total = len(rows)
+    page = rows[offset:offset + _PRODUCTS_PAGE]
+    thumbs = flow_images.thumbnails_b64([r.get("image_url") or "" for r in page])
     items: list[dict[str, Any]] = [
         _nav_item(
             str(r["id"]),
@@ -170,27 +205,38 @@ def _product_list_screen(rows: list[dict[str, Any]], cfg: dict[str, Any], empty_
             metadata=_product_meta(r, cfg),
             image_b64=thumbs.get(r.get("image_url") or "") or None,
         )
-        for r in rows
+        for r in page
     ]
     if not items:
         # No products → a self-refreshing placeholder (empty payload). PRODUCTS has
         # no backward route to CATEGORIES; the customer taps ← to go back.
         items.append(_nav_item("__empty__", "No products here", {}, metadata=empty_hint + " · tap ← to go back"))
+    else:
+        remaining = total - (offset + _PRODUCTS_PAGE)
+        if remaining > 0 and more_base is not None:
+            items.append(_nav_item(
+                "__more__", "⬇️ Show more",
+                {**more_base, "more": "1", "offset": str(offset + _PRODUCTS_PAGE)},
+                metadata=f"{remaining} more product(s)",
+            ))
     return _resp("PRODUCTS", {"products": items})
 
 
-def _products_screen(category: str, cfg: dict[str, Any]) -> dict[str, Any]:
-    return _product_list_screen(catalog.get_products_by_category(category), cfg, "Try another category")
+def _products_screen(category: str, cfg: dict[str, Any], offset: int = 0) -> dict[str, Any]:
+    return _product_list_screen(
+        catalog.get_products_by_category(category), cfg, "Try another category",
+        more_base={"category": category}, offset=offset,
+    )
 
 
-def _featured_screen(kind: str, cfg: dict[str, Any]) -> dict[str, Any]:
+def _featured_screen(kind: str, cfg: dict[str, Any], offset: int = 0) -> dict[str, Any]:
     """Home shortcuts: 'new' = newest by created_at, 'best' = highest rating."""
     rows = catalog.fetch_active_rows()
     if kind == "new":
         rows = sorted(rows, key=lambda r: str(r.get("created_at") or ""), reverse=True)
     else:  # "best" / featured
         rows = sorted(rows, key=lambda r: float(r.get("rating_average") or -1), reverse=True)
-    return _product_list_screen(rows, cfg, "Nothing here yet")
+    return _product_list_screen(rows, cfg, "Nothing here yet", more_base={"featured": kind}, offset=offset)
 
 
 def _product_detail_screen(product_id: str, cfg: dict[str, Any]) -> dict[str, Any]:
@@ -209,6 +255,7 @@ def _product_detail_screen(product_id: str, cfg: dict[str, Any]) -> dict[str, An
                 "description": "This item is no longer available.",
                 "stock_label": "Out of stock",
                 "in_stock": False,
+                "qty_options": _qty_options(1),
                 "image": flow_images.detail_b64(""),
             },
         )
@@ -225,6 +272,8 @@ def _product_detail_screen(product_id: str, cfg: dict[str, Any]) -> dict[str, An
             "description": (row.get("description") or "").strip() or "—",
             "stock_label": _stock_label(row),
             "in_stock": in_stock,
+            # Quantity dropdown options, capped to available stock (1..min(stock,_MAX_QTY)).
+            "qty_options": _qty_options(max_qty),
             # Always a valid base64 JPEG (placeholder when the product has no image).
             "image": flow_images.detail_b64(row.get("image_url") or ""),
         },
@@ -423,6 +472,8 @@ async def _dispatch(payload: dict[str, Any]) -> dict[str, Any]:
             return _cart_screen(sender, cfg)
         if nav == "track":
             return _track_screen("", cfg)
+        if nav == "more":  # "Show more categories" — next CATEGORIES page
+            return _categories_screen(sender, cfg, _to_int(data.get("offset")))
 
     # action == "data_exchange" (or anything else) → route by screen + payload.
     if screen == "STORE_HOME":
@@ -439,6 +490,12 @@ async def _dispatch(payload: dict[str, Any]) -> dict[str, Any]:
         return _products_screen(data.get("category") or "", cfg)
 
     if screen == "PRODUCTS":
+        if data.get("more"):  # "Show more" — next page of the same list (stays on PRODUCTS)
+            offset = _to_int(data.get("offset"))
+            featured = (data.get("featured") or "").strip().lower()
+            if featured:
+                return _featured_screen(featured, cfg, offset)
+            return _products_screen(data.get("category") or "", cfg, offset)
         return _product_detail_screen(data.get("product_id") or "", cfg)
 
     if screen == "PRODUCT_DETAIL":
