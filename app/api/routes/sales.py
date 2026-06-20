@@ -116,8 +116,8 @@ async def update_payment_settings(payload: SalesPaymentSettingsUpdate, token: di
 
 # ── Orders (read-only admin view) ────────────────────────────────────────────
 @router.get("/orders", response_model=SalesOrdersListResponse)
-async def list_orders(token: dict = Depends(verify_token)):
-    rows = orders.list_orders()
+async def list_orders(include_drafts: bool = False, token: dict = Depends(verify_token)):
+    rows = orders.list_orders(include_drafts=include_drafts)
     result: list[SalesOrderOut] = []
     for order in rows:
         items = [

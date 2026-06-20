@@ -5,7 +5,7 @@ DB cart, always recomputing prices/totals server-side from ``sales_products``
 import logging
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.db.supabase_client import first_row, supabase, supabase_admin
@@ -85,9 +85,33 @@ def _build_lines_from_specs(specs: list[dict[str, Any]], cfg: dict[str, Any]) ->
     return lines, notes
 
 
+def cleanup_stale_drafts(hours: int = 24) -> int:
+    """Delete abandoned ``draft`` orders (never reached the address step) older
+    than ``hours``, plus their line items, so the orders table doesn't fill with
+    junk. Conservative on purpose: ``pending_payment`` orders are left alone (a
+    payment link may still be paid). Returns how many orders were removed."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    try:
+        res = (
+            _db().table(ORDERS).select("id").eq("status", "draft").lt("created_at", cutoff).execute()
+        )
+        ids = [r["id"] for r in (getattr(res, "data", None) or []) if isinstance(r, dict) and r.get("id")]
+        if not ids:
+            return 0
+        _db().table(ORDER_ITEMS).delete().in_("order_id", ids).execute()
+        _db().table(ORDERS).delete().in_("id", ids).execute()
+        return len(ids)
+    except Exception:
+        logger.exception("Failed to clean up stale draft orders")
+        return 0
+
+
 def create_order(sender: str, specs: list[dict[str, Any]], cfg: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
     """Create a draft order from item specs. Returns (order, notes); order is None
     if nothing orderable remained."""
+    # Opportunistic housekeeping — prune old abandoned drafts on each checkout
+    # (cheap, low volume) so no separate cron job is needed.
+    cleanup_stale_drafts()
     lines, notes = _build_lines_from_specs(specs, cfg)
     if not lines:
         return None, notes
@@ -234,6 +258,11 @@ def mark_order_failed(order_id: str) -> None:
     _db().table(ORDERS).update({"payment_status": "failed"}).eq("id", order_id).execute()
 
 
-def list_orders(limit: int = 200) -> list[dict[str, Any]]:
-    res = _db().table(ORDERS).select("*").order("created_at", desc=True).limit(limit).execute()
+def list_orders(limit: int = 200, include_drafts: bool = False) -> list[dict[str, Any]]:
+    """Admin order list. Drafts (unsubmitted carts) are hidden by default so the
+    dashboard shows real orders; pass ``include_drafts=True`` to see them."""
+    query = _db().table(ORDERS).select("*")
+    if not include_drafts:
+        query = query.neq("status", "draft")
+    res = query.order("created_at", desc=True).limit(limit).execute()
     return [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]

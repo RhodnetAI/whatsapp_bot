@@ -39,14 +39,19 @@ router = APIRouter(tags=["sales-flow"])
 
 DATA_API_VERSION = "3.0"
 _MAX_QTY = 10  # cap the quantity stepper / dropdown options
-# Page sizes for the NavigationList screens. A NavigationList holds at most 20
-# items, and each PRODUCTS row carries a base64 thumbnail (the whole Flow
-# response must stay under WhatsApp's 1 MB limit) — so we show one page at a
-# time and append a "Show more" row that re-fetches the next page via
-# data_exchange. This lets a category hold hundreds/thousands of products
-# without silently truncating them.
-_PRODUCTS_PAGE = 8     # products per PRODUCTS page (+1 "Show more" row ≤ 20)
-_CATEGORIES_PAGE = 16  # categories per page (+ "Show more" + 2 shortcuts ≤ 20)
+# NavigationList screens load **cumulatively**: each "Show more" tap re-renders
+# the SAME screen with the list grown from the start (old items kept + new ones
+# appended), not a replacing window. A NavigationList holds at most ~20 items and
+# each PRODUCTS row carries a base64 thumbnail (the whole response must stay under
+# WhatsApp's 1 MB limit), so growth is capped per screen; beyond the cap the list
+# can't grow further (a platform limit) and the customer narrows down by
+# category/search. The ``offset`` in a "Show more" payload is the *target number
+# of items to show* (not a window start). Re-fetching thumbnails for the whole
+# visible set on each tap is cheap thanks to ``flow_images``' disk cache.
+_PRODUCTS_PAGE = 8      # how many more products each "Show more" reveals
+_PRODUCTS_MAX = 12      # max products kept on one screen (payload / list-size safe)
+_CATEGORIES_PAGE = 8    # how many more categories each "Show more" reveals
+_CATEGORIES_MAX = 17    # max categories on one screen (+ "Show more" + 2 shortcuts ≤ 20)
 
 
 # ── Screen-data helpers ──────────────────────────────────────────────────────
@@ -166,28 +171,36 @@ def _list_nav_items() -> list[dict[str, Any]]:
 
 def _categories_screen(sender: str, cfg: dict[str, Any], offset: int = 0) -> dict[str, Any]:
     """Category cards with a product count, plus the cart/track shortcuts.
-    Paginated: when there are more categories than fit on one page, a
-    "Show more categories" row re-fetches the next page (same screen) — so a
-    catalog with many categories isn't truncated."""
+    Cumulative: "Show more categories" grows the list from the start (old + new)
+    until the per-screen cap, then stops (a NavigationList holds ~20 items)."""
     rows = catalog.fetch_active_rows()
     counts: dict[str, int] = {}
     for r in rows:
         c = (r.get("category") or "").strip() or "Other"
         counts[c] = counts.get(c, 0) + 1
     all_categories = catalog.get_categories()
-    page = all_categories[offset:offset + _CATEGORIES_PAGE]
+    total = len(all_categories)
+    # Cumulative count to show (always from the start), clamped to the cap.
+    shown = max(_CATEGORIES_PAGE, min(offset or _CATEGORIES_PAGE, _CATEGORIES_MAX, total)) if total else 0
     items = [
         _nav_item(c, c, {"category": c}, metadata=f"{counts.get(c, 0)} product(s)")
-        for c in page
+        for c in all_categories[:shown]
     ]
     if not all_categories:
         items.append(_nav_item("__none__", "No products yet", {"category": ""}, metadata="Check back soon"))
-    remaining = len(all_categories) - (offset + _CATEGORIES_PAGE)
-    if remaining > 0:
+    capped = min(total, _CATEGORIES_MAX)
+    if shown < capped:
         items.append(_nav_item(
             "__more_cats__", "⬇️ Show more categories",
-            {"nav": "more", "offset": str(offset + _CATEGORIES_PAGE)},
-            metadata=f"{remaining} more",
+            {"nav": "more", "offset": str(min(shown + _CATEGORIES_PAGE, _CATEGORIES_MAX))},
+            metadata=f"{capped - shown} more",
+        ))
+    elif total > _CATEGORIES_MAX:
+        # Hit the per-screen cap but the catalog has more — can't grow further.
+        items.append(_nav_item(
+            "__cats_capped__", f"Showing first {_CATEGORIES_MAX} categories",
+            {"nav": "more", "offset": str(shown)},
+            metadata="Tap a category to narrow down",
         ))
     items += _list_nav_items()
     return _resp("CATEGORIES", {"categories": items})
@@ -201,15 +214,18 @@ def _product_list_screen(
     offset: int = 0,
 ) -> dict[str, Any]:
     """Render a product NavigationList (image + name + price/rating) from rows.
-    Paginated: shows ``_PRODUCTS_PAGE`` rows starting at ``offset``; when more
-    remain, a "Show more" row (carrying ``more_base`` + the next offset)
-    re-fetches the next page on the same screen — so a category with hundreds of
-    products isn't truncated. The PRODUCTS screen has no cart/home/track
-    shortcuts; the customer taps a product, "Show more", or the native back
-    arrow. Shared by category, new-arrivals and best-sellers views."""
+    Cumulative: shows products from the start up to ``offset`` (clamped to
+    ``_PRODUCTS_MAX``); "Show more" grows the list in place (old items kept + new
+    appended). Beyond the cap the list can't grow (NavigationList ~20-item / 1 MB
+    payload limit) — an info row suggests narrowing by category/search. The
+    PRODUCTS screen has no cart/home/track shortcuts; the customer taps a product,
+    "Show more", or the native back arrow. Shared by category, new-arrivals,
+    best-sellers (and search) views."""
     total = len(rows)
-    page = rows[offset:offset + _PRODUCTS_PAGE]
-    thumbs = flow_images.thumbnails_b64([r.get("image_url") or "" for r in page])
+    # Cumulative count to show (always from the start), clamped to the cap.
+    shown = max(_PRODUCTS_PAGE, min(offset or _PRODUCTS_PAGE, _PRODUCTS_MAX, total)) if total else 0
+    visible = rows[:shown]
+    thumbs = flow_images.thumbnails_b64([r.get("image_url") or "" for r in visible])
     items: list[dict[str, Any]] = [
         _nav_item(
             str(r["id"]),
@@ -218,19 +234,26 @@ def _product_list_screen(
             metadata=_product_meta(r, cfg),
             image_b64=thumbs.get(r.get("image_url") or "") or None,
         )
-        for r in page
+        for r in visible
     ]
     if not items:
         # No products → a self-refreshing placeholder (empty payload). PRODUCTS has
         # no backward route to CATEGORIES; the customer taps ← to go back.
         items.append(_nav_item("__empty__", "No products here", {}, metadata=empty_hint + " · tap ← to go back"))
-    else:
-        remaining = total - (offset + _PRODUCTS_PAGE)
-        if remaining > 0 and more_base is not None:
+    elif more_base is not None:
+        capped = min(total, _PRODUCTS_MAX)
+        if shown < capped:
             items.append(_nav_item(
                 "__more__", "⬇️ Show more",
-                {**more_base, "more": "1", "offset": str(offset + _PRODUCTS_PAGE)},
-                metadata=f"{remaining} more product(s)",
+                {**more_base, "more": "1", "offset": str(min(shown + _PRODUCTS_PAGE, _PRODUCTS_MAX))},
+                metadata=f"{capped - shown} more product(s)",
+            ))
+        elif total > _PRODUCTS_MAX:
+            # Hit the per-screen cap but more exist — can't grow further.
+            items.append(_nav_item(
+                "__capped__", f"Showing first {_PRODUCTS_MAX}",
+                {**more_base, "more": "1", "offset": str(shown)},
+                metadata="Open a category or search to narrow down",
             ))
     return _resp("PRODUCTS", {"products": items})
 

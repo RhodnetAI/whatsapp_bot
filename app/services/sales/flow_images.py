@@ -16,8 +16,11 @@ host can't stall the data-exchange response; any failure degrades gracefully
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import logging
+import os
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -38,6 +41,48 @@ _cache: dict[tuple[str, str], str] = {}
 _lock = threading.Lock()
 _pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="flow-img")
 _placeholder: str | None = None
+
+# Persistent (on-disk) cache layer. The in-memory ``_cache`` is per-process and
+# lost on restart / not shared across workers, so the first browse of each
+# category would otherwise re-download + re-encode every image (risking the
+# ~12 s endpoint budget). We additionally persist each *successful* encoded
+# base64 string to a small file keyed by url+kind, so a new worker or a restart
+# re-reads it instantly instead of refetching. Failures are not persisted (so a
+# transient host outage is retried later). Override the location with
+# ``WHATSAPP_FLOW_IMG_CACHE_DIR``.
+_DISK_DIR = os.environ.get("WHATSAPP_FLOW_IMG_CACHE_DIR") or os.path.join(
+    tempfile.gettempdir(), "wa_flow_imgcache"
+)
+
+
+def _disk_path(key: tuple[str, str]) -> str:
+    digest = hashlib.sha1(f"{key[0]}|{key[1]}".encode("utf-8")).hexdigest()
+    return os.path.join(_DISK_DIR, f"{digest}.b64")
+
+
+def _disk_read(key: tuple[str, str]) -> str | None:
+    try:
+        with open(_disk_path(key), "r", encoding="ascii") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return None
+    except Exception:
+        logger.info("Store Flow: image disk-cache read failed")
+        return None
+
+
+def _disk_write(key: tuple[str, str], value: str) -> None:
+    if not value:  # never persist a failed/empty result — let it retry later
+        return
+    try:
+        os.makedirs(_DISK_DIR, exist_ok=True)
+        path = _disk_path(key)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="ascii") as fh:
+            fh.write(value)
+        os.replace(tmp, path)  # atomic swap so readers never see a partial file
+    except Exception:
+        logger.info("Store Flow: image disk-cache write failed")
 
 
 def _download(url: str) -> bytes | None:
@@ -77,6 +122,14 @@ def _get(url: str, kind: str, max_px: int, max_b64: int) -> str:
     with _lock:
         if key in _cache:
             return _cache[key]
+    # Persistent disk cache — survives restarts and is shared across workers.
+    disk = _disk_read(key)
+    if disk is not None:
+        with _lock:
+            if len(_cache) >= _MAX_CACHE:
+                _cache.clear()
+            _cache[key] = disk
+        return disk
     raw = _download(url)
     value = _encode(raw, max_px, max_b64) if raw else None
     value = value or ""
@@ -84,6 +137,7 @@ def _get(url: str, kind: str, max_px: int, max_b64: int) -> str:
         if len(_cache) >= _MAX_CACHE:
             _cache.clear()
         _cache[key] = value
+    _disk_write(key, value)  # persists only non-empty (successful) results
     return value
 
 
