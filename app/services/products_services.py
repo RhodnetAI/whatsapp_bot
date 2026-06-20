@@ -15,8 +15,6 @@ from app.models.schemas import (
     ProductServiceUpdate,
     ProductsServicesUploadStatusResponse,
 )
-from app.services.vectorizer import delete_document_vectors, store_product_service_vectors
-
 logger = logging.getLogger("whatsapp")
 
 TABLE_NAME = "information_bot_products_services"
@@ -92,59 +90,6 @@ def list_items() -> list[ProductServiceItem]:
     return [_row_to_item(row) for row in rows]
 
 
-def _build_embedding_text(kind: str, fields: dict[str, str]) -> str:
-    """Turn the structured fields into a natural-language blob suitable for
-    chunking/embedding — this is what the Information Agent's RAG search will
-    actually match against and quote from."""
-    label = "Product" if kind == "product" else "Service"
-    lines = [f"{label} name: {fields.get('name') or 'Untitled'}"]
-
-    if fields.get("category"):
-        lines.append(f"Category: {fields['category']}")
-    lines.append(f"Availability status: {fields.get('status') or 'Active'}")
-
-    price_bits = []
-    if fields.get("price"):
-        price_bits.append(f"price {fields['price']}")
-    if fields.get("discount_price"):
-        price_bits.append(f"discounted price {fields['discount_price']}")
-    if price_bits:
-        lines.append("Pricing: " + ", ".join(price_bits))
-
-    feedback_bits = []
-    if fields.get("rating"):
-        feedback_bits.append(f"average rating {fields['rating']}")
-    if fields.get("reviews_count"):
-        feedback_bits.append(f"{fields['reviews_count']} reviews")
-    if fields.get("purchased_count"):
-        feedback_bits.append(f"purchased {fields['purchased_count']} times")
-    if feedback_bits:
-        lines.append("Customer feedback: " + ", ".join(feedback_bits))
-
-    if fields.get("short_description"):
-        lines.append(f"Summary: {fields['short_description']}")
-    if fields.get("full_description"):
-        lines.append(f"Details: {fields['full_description']}")
-
-    return "\n".join(lines)
-
-
-async def _embed_item(item_id: str, kind: str, fields: dict[str, str]) -> str:
-    """Embed the item and upsert its vectors into Qdrant. Returns the resulting vectorization_status."""
-    try:
-        text = _build_embedding_text(kind, fields)
-        await store_product_service_vectors(
-            item_id=item_id,
-            name=fields.get("name") or "Untitled",
-            text=text,
-            created_at=datetime.now(timezone.utc).isoformat(),
-        )
-        return "done"
-    except Exception:
-        logger.exception("Failed to embed product/service %s", item_id)
-        return "failed"
-
-
 async def _create_row(kind: str, fields: dict[str, str], source: str) -> ProductServiceItem:
     item_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
@@ -153,15 +98,11 @@ async def _create_row(kind: str, fields: dict[str, str], source: str) -> Product
         "kind": kind,
         **fields,
         "source": source,
-        "vectorization_status": "processing",
+        "vectorization_status": "done",
         "created_at": now,
         "updated_at": now,
     }
     _db().table(TABLE_NAME).insert(row).execute()
-
-    status = await _embed_item(item_id, kind, fields)
-    row["vectorization_status"] = status
-    _db().table(TABLE_NAME).update({"vectorization_status": status}).eq("id", item_id).execute()
 
     return _row_to_item(row)
 
@@ -178,29 +119,16 @@ async def update_item(item_id: str, payload: ProductServiceUpdate) -> ProductSer
 
     fields = payload.model_dump()
     now = datetime.now(timezone.utc).isoformat()
-    update_payload = {**fields, "vectorization_status": "processing", "updated_at": now}
+    update_payload = {**fields, "vectorization_status": "done", "updated_at": now}
     _db().table(TABLE_NAME).update(update_payload).eq("id", item_id).execute()
 
-    try:
-        await delete_document_vectors(item_id)
-    except Exception:
-        logger.warning("Failed to delete previous vectors for product/service %s", item_id)
-
-    status = await _embed_item(item_id, cast(str, existing.get("kind") or "product"), fields)
-    _db().table(TABLE_NAME).update({"vectorization_status": status}).eq("id", item_id).execute()
-
-    return _row_to_item({**existing, **update_payload, "vectorization_status": status})
+    return _row_to_item({**existing, **update_payload})
 
 
 async def delete_item(item_id: str) -> None:
     existing = first_row(_db().table(TABLE_NAME).select("*").eq("id", item_id).execute())
     if existing is None:
         raise HTTPException(status_code=404, detail="Product/service not found")
-
-    try:
-        await delete_document_vectors(item_id)
-    except Exception:
-        logger.warning("Failed to delete vectors for product/service %s", item_id)
 
     _db().table(TABLE_NAME).delete().eq("id", item_id).execute()
 

@@ -487,6 +487,22 @@ async def _ai_answer(sender: str, question: str, cfg: dict[str, Any], conversati
     return [m.buttons(answer, _ai_nav_buttons())], {"step": "ai_qa"}
 
 
+async def _ai_only_reply(
+    sender: str, question: str, cfg: dict[str, Any], conversation_data: list[dict[str, Any]]
+):
+    """Storefront-disabled mode: the Sales Bot still answers as a pure AI
+    assistant driven by its always-on Instructions (and Company Info) section.
+    No product catalog is injected and no store navigation is shown — used when
+    sales_products_enabled is off, so the bot keeps responding to messages."""
+    try:
+        reply = await ai_chat.generate_sales_ai_reply(question.strip(), conversation_data)
+    except Exception:
+        logger.exception("Sales AI (storefront disabled) reply failed")
+        reply = ""
+    answer = (reply or "").strip() or "Sorry, I didn't catch that. Could you please rephrase?"
+    return [m.text(answer)], _idle()
+
+
 # ── Checkout & payment ───────────────────────────────────────────────────────
 def _order_summary_text(order: dict[str, Any], cfg: dict[str, Any]) -> str:
     currency = order.get("currency") or cfg["currency"]
@@ -762,8 +778,12 @@ async def _handle_reply(sender: str, rid: str, state: dict[str, Any], cfg: dict[
 async def _route(sender: str, parsed: dict[str, Any], state: dict[str, Any], conversation_data: list[dict[str, Any]]):
     cfg = await load_sales_config()
 
+    # Storefront disabled → no menu/cart/checkout, but the Sales Bot still runs
+    # as a pure AI assistant off its always-on Instructions section. Route every
+    # message straight to the AI instead of replying that the shop is closed.
     if not cfg["products_enabled"]:
-        return [m.text("Our shop isn't open right now. Please check back soon.")], _idle()
+        question = (parsed.get("text") or parsed.get("display") or "").strip()
+        return await _ai_only_reply(sender, question, cfg, conversation_data)
 
     kind = parsed["kind"]
     if kind == "order":
