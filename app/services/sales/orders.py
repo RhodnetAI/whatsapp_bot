@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.db.supabase_client import first_row, supabase, supabase_admin
-from app.services.sales import catalog
+from app.services.sales import cart, catalog
 
 logger = logging.getLogger("whatsapp")
 
@@ -71,7 +71,7 @@ def _build_lines_from_specs(specs: list[dict[str, Any]], cfg: dict[str, Any]) ->
                 )
                 requested = int(stock)
 
-        unit = int(product.get("price_minor") or 0)
+        unit = catalog.effective_unit_price_minor(product)
         lines.append(
             {
                 "product_id": product.get("id"),
@@ -208,6 +208,13 @@ def mark_order_paid(order_id: str) -> dict[str, Any] | None:
     if order.get("status") == "paid":
         return order
     _db().table(ORDERS).update({"status": "paid", "payment_status": "paid"}).eq("id", order_id).execute()
+
+    # Cart is emptied only now (on confirmed payment), not at checkout — so an
+    # abandoned/unpaid checkout leaves the cart intact for the customer.
+    try:
+        cart.clear_cart(order.get("sender") or "")
+    except Exception:
+        logger.exception("Could not clear cart for sender after payment")
 
     for item in get_order_items(order_id):
         product_id = item.get("product_id")

@@ -66,7 +66,8 @@ def add_item(sender: str, product_id: str, quantity: int) -> bool:
                 "cart_id": cart["id"],
                 "product_id": product_id,
                 "quantity": quantity,
-                "unit_price_minor": int(product.get("price_minor") or 0),
+                # Discounted unit price when a discount applies (honours sale price).
+                "unit_price_minor": catalog.effective_unit_price_minor(product),
             }
         ).execute()
     return True
@@ -100,7 +101,12 @@ def get_items(sender: str) -> list[dict[str, Any]]:
                 "retailer_id": product.get("retailer_id") or "",
                 "name": product.get("name") or "Item",
                 "quantity": int(item.get("quantity") or 1),
-                "unit_price_minor": int(product.get("price_minor") or item.get("unit_price_minor") or 0),
+                # Re-derive from the live product so discount changes are reflected;
+                # fall back to the stored price if the product row is gone.
+                "unit_price_minor": (
+                    catalog.effective_unit_price_minor(product)
+                    if product else int(item.get("unit_price_minor") or 0)
+                ),
                 "image_url": product.get("image_url") or "",
                 "stock_quantity": product.get("stock_quantity"),
             }

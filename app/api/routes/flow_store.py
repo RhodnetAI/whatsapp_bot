@@ -76,7 +76,20 @@ def _to_int(value: Any, default: int = 0) -> int:
 
 
 def _price_str(row: dict[str, Any], cfg: dict[str, Any]) -> str:
-    return m.format_money(row.get("price_minor") or 0, row.get("currency") or cfg["currency"])
+    """Effective (discounted) unit price — used in list rows and cart lines."""
+    return m.format_money(catalog.effective_unit_price_minor(row), row.get("currency") or cfg["currency"])
+
+
+def _price_detail(row: dict[str, Any], cfg: dict[str, Any]) -> str:
+    """Detail-screen price line: the sale price, plus the original M.R.P. and the
+    percent off when the product is discounted."""
+    currency = row.get("currency") or cfg["currency"]
+    effective = catalog.effective_unit_price_minor(row)
+    base = int(row.get("price_minor") or 0)
+    discount = float(row.get("discount_percentage") or 0)
+    if discount > 0 and effective < base:
+        return f"{m.format_money(effective, currency)}  (M.R.P. {m.format_money(base, currency)}, {discount:.0f}% off)"
+    return m.format_money(effective, currency)
 
 
 def _stock_label(row: dict[str, Any]) -> str:
@@ -267,7 +280,7 @@ def _product_detail_screen(product_id: str, cfg: dict[str, Any]) -> dict[str, An
         {
             "product_id": str(row["id"]),
             "title": row.get("name") or "Item",
-            "price": _price_str(row, cfg),
+            "price": _price_detail(row, cfg),
             "rating": _rating_str(row) or "Not yet rated",
             "description": (row.get("description") or "").strip() or "—",
             "stock_label": _stock_label(row),
@@ -280,34 +293,49 @@ def _product_detail_screen(product_id: str, cfg: dict[str, Any]) -> dict[str, An
     )
 
 
+# Per-item edit controls add 2 rows per line (add-one + remove-one); reserve room
+# for the Checkout + Clear rows so the NavigationList stays within its ~20-item cap.
+_CART_EDIT_ITEMS = 9
+
+
 def _cart_screen(sender: str, cfg: dict[str, Any], flash: str = "") -> dict[str, Any]:
-    """Render the cart as an image-backed NavigationList with item details, plus a
-    Checkout row. To keep shopping the customer uses the device's native back
-    arrow — "continue shopping" would be a backward route, which WhatsApp's
-    routing_model forbids. Cart line taps just refresh the cart (re-opening a
-    product page would also be a backward route)."""
+    """Render the cart as an editable NavigationList. Each line gets two rows:
+    tap the item to **add one**, tap the ➖ row to **remove one** (which removes
+    the line at qty 1) — both re-render the cart (a self-update, allowed even
+    though edits aren't in the routing_model). A **Clear cart** and **Checkout**
+    row follow. To keep shopping the customer uses the device's native back arrow
+    ("continue shopping" would be a backward route the routing_model forbids).
+    All edits reuse ``cart.update_quantity`` / ``cart.remove_item``."""
     items = cart.get_items(sender)
-    thumbs = flow_images.thumbnails_b64([i.get("image_url") or "" for i in items])
+    editable = items[:_CART_EDIT_ITEMS]
+    thumbs = flow_images.thumbnails_b64([i.get("image_url") or "" for i in editable])
     cart_items: list[dict[str, Any]] = []
-    subtotal = 0
-    for i in items:
+    subtotal = sum(i["unit_price_minor"] * i["quantity"] for i in items)
+
+    for i in editable:
+        pid = str(i.get("product_id") or "")
+        name = i.get("name") or "Item"
         line_total = i["unit_price_minor"] * i["quantity"]
-        subtotal += line_total
-        item: dict[str, Any] = {
-            "id": str(i.get("product_id") or ""),
+        # Row 1 — tap to add one of this item.
+        row: dict[str, Any] = {
+            "id": pid,
             "main-content": {
-                "title": i.get("name") or "Item",
+                "title": name,
                 "description": f"Qty {i.get('quantity')}",
-                "metadata": m.format_money(line_total, cfg["currency"]),
+                "metadata": _clip(f"{m.format_money(line_total, cfg['currency'])} · tap ➕ to add one", 80),
             },
-            # No payload → tapping a line just re-renders the cart (self), never a
-            # backward jump to the product page.
-            "on-click-action": {"name": "data_exchange", "payload": {}},
+            "on-click-action": {"name": "data_exchange", "payload": {"item_action": "inc", "product_id": pid}},
         }
         thumb = thumbs.get(i.get("image_url") or "")
         if thumb:
-            item["start"] = {"image": thumb, "alt-text": i.get("name") or "Item"}
-        cart_items.append(item)
+            row["start"] = {"image": thumb, "alt-text": name}
+        cart_items.append(row)
+        # Row 2 — tap to remove one (removes the line entirely at qty 1).
+        cart_items.append(_nav_item(
+            f"dec_{pid}", f"➖ Remove one — {name}",
+            {"item_action": "dec", "product_id": pid},
+            metadata="Removes the item when qty reaches 0",
+        ))
 
     if items:
         shipping = orders._compute_shipping(subtotal, cfg)
@@ -316,11 +344,14 @@ def _cart_screen(sender: str, cfg: dict[str, Any], flash: str = "") -> dict[str,
             f"• {i['name']} ×{i['quantity']} — {m.format_money(i['unit_price_minor'] * i['quantity'], cfg['currency'])}"
             for i in items
         )
+        if len(items) > _CART_EDIT_ITEMS:
+            summary += f"\n(Showing controls for the first {_CART_EDIT_ITEMS} items.)"
         summary += f"\n\nSubtotal: {m.format_money(subtotal, cfg['currency'])}"
         if shipping:
             summary += f"\nShipping: {m.format_money(shipping, cfg['currency'])}"
         summary += f"\n*Total: {m.format_money(total, cfg['currency'])}*"
-        cart_items.append(_nav_item("__checkout__", "Checkout", {"cart_action": "checkout"}, metadata="Continue to delivery"))
+        cart_items.append(_nav_item("__checkout__", "✅ Checkout", {"cart_action": "checkout"}, metadata="Continue to delivery"))
+        cart_items.append(_nav_item("__clear__", "🧹 Clear cart", {"cart_action": "clear"}, metadata="Remove all items"))
     else:
         summary = "Your cart is empty. Tap ← to keep shopping."
         # A NavigationList needs at least one row; this one self-refreshes.
@@ -396,7 +427,8 @@ async def _checkout_screen(sender: str, cfg: dict[str, Any], flow_token: str) ->
     order, notes = orders.create_order(sender, specs, cfg)
     if not order:
         return _cart_screen(sender, cfg, flash="None of your cart items are available anymore.")
-    cart.mark_checked_out(sender)
+    # Cart is NOT emptied here — it's cleared on confirmed payment
+    # (orders.mark_order_paid), so an abandoned checkout keeps the cart intact.
     return _checkout_or_address(order, cfg, notes, flow_token)
 
 
@@ -514,8 +546,22 @@ async def _dispatch(payload: dict[str, Any]) -> dict[str, Any]:
         cart_action = (data.get("cart_action") or "").strip().lower()
         if cart_action == "checkout":
             return await _checkout_screen(sender, cfg, flow_token)
-        # Any other CART tap (line item, empty placeholder) just refreshes the
-        # cart — there are no backward routes out of CART (only ADDRESS/SUCCESS).
+        if cart_action == "clear":
+            cart.clear_cart(sender)
+            return _cart_screen(sender, cfg, flash="Cart cleared.")
+        # Per-line edits — increase/decrease quantity or remove (self-update).
+        item_action = (data.get("item_action") or "").strip().lower()
+        product_id = (data.get("product_id") or "").strip()
+        if item_action and product_id:
+            if item_action == "inc":
+                cart.update_quantity(sender, product_id, 1)
+            elif item_action == "dec":
+                cart.update_quantity(sender, product_id, -1)
+            elif item_action == "remove":
+                cart.remove_item(sender, product_id)
+            return _cart_screen(sender, cfg)
+        # Any other CART tap (empty placeholder) just refreshes the cart — there
+        # are no backward routes out of CART (only ADDRESS/SUCCESS).
         return _cart_screen(sender, cfg)
 
     if screen == "TRACK_ORDER":

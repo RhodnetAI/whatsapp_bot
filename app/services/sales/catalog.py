@@ -102,6 +102,23 @@ def compute_sale_price_minor(price_minor: int, discount_percentage: float) -> in
     return max(0, round(price_minor * (1 - discount_percentage / 100)))
 
 
+def effective_unit_price_minor(row: dict[str, Any]) -> int:
+    """The price a customer actually pays for one unit: the discounted
+    ``sale_price_minor`` when a discount applies, otherwise the full
+    ``price_minor``. Defensive — recomputes from ``discount_percentage`` if
+    ``sale_price_minor`` is missing or zero on older rows. This is the single
+    source of truth for pricing across cart, orders and the store Flow, so
+    discounts are honoured everywhere."""
+    price = int(row.get("price_minor") or 0)
+    discount = float(row.get("discount_percentage") or 0)
+    if discount <= 0:
+        return price
+    sale = row.get("sale_price_minor")
+    if sale is not None and int(sale) > 0:
+        return int(sale)
+    return compute_sale_price_minor(price, discount)
+
+
 def _require_google_product_category(value: str | None) -> str:
     category = (value or "").strip()
     if not category:
