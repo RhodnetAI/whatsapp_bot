@@ -106,38 +106,10 @@ def _sync_one(row: dict[str, Any], access_token: str, catalog_id: str) -> tuple[
         return False, str(exc), None
 
 
-def sync_products(product_ids: list[str]) -> dict[str, Any]:
-    """Sync specific products (by id) to the Meta catalog — used after a sale to
-    push the reduced stock so Commerce Manager reflects it. Best-effort: no-op when
-    the catalog isn't configured; per-product failures are recorded in
-    ``sync_status``/``sync_error`` and don't stop the others."""
-    if not is_configured() or not product_ids:
-        return {"synced": 0, "failed": 0}
-    synced = 0
-    failed = 0
-    for product_id in product_ids:
-        row = catalog.get_row(product_id)
-        if not row:
-            continue
-        ok, err, meta_id = _sync_one(row, settings.meta_access_token, settings.meta_catalog_id)
-        update: dict[str, Any] = {
-            "sync_status": "synced" if ok else "failed",
-            "sync_error": "" if ok else err[:500],
-        }
-        if meta_id:
-            update["meta_catalog_id"] = meta_id
-        _db().table(catalog.TABLE).update(update).eq("id", row["id"]).execute()
-        synced += 1 if ok else 0
-        failed += 0 if ok else 1
-    return {"synced": synced, "failed": failed}
-
-
-def sync_all() -> dict[str, Any]:
-    """Sync every active product. Returns a summary dict."""
-    if not is_configured():
-        return {"synced": 0, "failed": 0, "error": "Meta Catalog not configured", "items": []}
-
-    rows = catalog.fetch_active_rows()
+def _sync_rows(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Push the given product rows to the Meta catalog and persist each one's
+    ``sync_status``/``sync_error`` (and ``meta_catalog_id`` when returned).
+    Per-product failures are recorded and don't stop the others. Returns counts."""
     synced = 0
     failed = 0
     for row in rows:
@@ -151,5 +123,51 @@ def sync_all() -> dict[str, Any]:
         _db().table(catalog.TABLE).update(update).eq("id", row["id"]).execute()
         synced += 1 if ok else 0
         failed += 0 if ok else 1
+    return {"synced": synced, "failed": failed}
 
-    return {"synced": synced, "failed": failed, "items": [i.model_dump() for i in catalog.list_products()]}
+
+def _needs_sync(row: dict[str, Any]) -> bool:
+    """A product needs (re)syncing when it was never successfully synced or has
+    changed since: ``catalog.update_product`` flips a ``synced`` product back to
+    ``pending`` on edit, and new products start as ``pending``. ``failed`` rows are
+    retried. Already-``synced`` (unchanged) rows are skipped."""
+    return (row.get("sync_status") or "pending") in ("pending", "failed")
+
+
+def sync_products(product_ids: list[str]) -> dict[str, Any]:
+    """Sync specific products (by id) to the Meta catalog — used after a sale to
+    push the reduced stock so Commerce Manager reflects it. Best-effort: no-op when
+    the catalog isn't configured."""
+    if not is_configured() or not product_ids:
+        return {"synced": 0, "failed": 0}
+    rows = [row for row in (catalog.get_row(pid) for pid in product_ids) if row]
+    return _sync_rows(rows)
+
+
+def sync_changed() -> dict[str, Any]:
+    """Sync only the products that need it — never-synced or edited-since-last-sync
+    (``sync_status`` in ``pending``/``failed``). Already-synced products are
+    skipped, so repeated clicks are cheap and don't re-push unchanged items. This
+    is the default for the admin "Sync" button. Returns a summary dict including
+    ``skipped`` (count of up-to-date products that were not re-sent)."""
+    if not is_configured():
+        return {"synced": 0, "failed": 0, "skipped": 0, "error": "Meta Catalog not configured", "items": []}
+    all_rows = catalog.fetch_active_rows()
+    to_sync = [row for row in all_rows if _needs_sync(row)]
+    result: dict[str, Any] = _sync_rows(to_sync)
+    result["skipped"] = len(all_rows) - len(to_sync)
+    result["items"] = [i.model_dump() for i in catalog.list_products()]
+    return result
+
+
+def sync_all() -> dict[str, Any]:
+    """Sync **every** active product (full re-sync), regardless of ``sync_status``.
+    Use this to force a complete re-push; the default button uses
+    :func:`sync_changed`. Returns a summary dict."""
+    if not is_configured():
+        return {"synced": 0, "failed": 0, "skipped": 0, "error": "Meta Catalog not configured", "items": []}
+    rows = catalog.fetch_active_rows()
+    result: dict[str, Any] = _sync_rows(rows)
+    result["skipped"] = 0
+    result["items"] = [i.model_dump() for i in catalog.list_products()]
+    return result

@@ -335,6 +335,8 @@ class SalesProductUpdate(BaseModel):
 
 class SalesProductsListResponse(BaseModel):
     items: list[SalesProductItem] = []
+    # Distinct categories across all products — populates the filter dropdown.
+    categories: list[str] = []
 
 
 class SalesProductSaveResponse(BaseModel):
@@ -357,6 +359,7 @@ class SalesProductsUploadStatusResponse(BaseModel):
 class SalesCatalogSyncResponse(BaseModel):
     synced: int = 0
     failed: int = 0
+    skipped: int = 0
     items: list[SalesProductItem] = []
 
 

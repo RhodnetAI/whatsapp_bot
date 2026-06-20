@@ -193,10 +193,55 @@ def _row_to_item(row: dict[str, Any]) -> SalesProductItem:
     )
 
 
-def list_products() -> list[SalesProductItem]:
-    result = _db().table(TABLE).select("*").order("created_at", desc=True).execute()
+def list_products(
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    category: str | None = None,
+    min_price_minor: int | None = None,
+    max_price_minor: int | None = None,
+    min_stock: int | None = None,
+    max_stock: int | None = None,
+) -> list[SalesProductItem]:
+    """List products, newest first, optionally filtered (admin Products tab).
+
+    All filters combine with AND. ``name``/``description`` are case-insensitive
+    substring matches; ``category`` is an exact match; price bounds are in minor
+    units (paise). Note: the stock bounds use SQL comparisons, so products with
+    **unlimited** stock (``stock_quantity`` is null) are excluded when a stock
+    filter is active. Called with no args (the default) it returns everything, so
+    existing callers are unaffected."""
+    query = _db().table(TABLE).select("*")
+    if name and name.strip():
+        query = query.ilike("name", f"%{name.strip()}%")
+    if description and description.strip():
+        query = query.ilike("description", f"%{description.strip()}%")
+    if category and category.strip():
+        query = query.eq("category", category.strip())
+    if min_price_minor is not None:
+        query = query.gte("price_minor", int(min_price_minor))
+    if max_price_minor is not None:
+        query = query.lte("price_minor", int(max_price_minor))
+    if min_stock is not None:
+        query = query.gte("stock_quantity", int(min_stock))
+    if max_stock is not None:
+        query = query.lte("stock_quantity", int(max_stock))
+    result = query.order("created_at", desc=True).execute()
     rows = getattr(result, "data", None) or []
     return [_row_to_item(row) for row in rows if isinstance(row, dict)]
+
+
+def list_all_categories() -> list[str]:
+    """Distinct, non-empty categories across **all** products (active + inactive),
+    sorted — for the admin Products filter dropdown."""
+    result = _db().table(TABLE).select("category").execute()
+    seen: set[str] = set()
+    for row in getattr(result, "data", None) or []:
+        if isinstance(row, dict):
+            cat = (row.get("category") or "").strip()
+            if cat:
+                seen.add(cat)
+    return sorted(seen)
 
 
 def fetch_active_rows() -> list[dict[str, Any]]:

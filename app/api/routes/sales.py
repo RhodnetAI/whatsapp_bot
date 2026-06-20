@@ -39,8 +39,33 @@ def _db():
 
 # ── Products ─────────────────────────────────────────────────────────────────
 @router.get("/products", response_model=SalesProductsListResponse)
-async def list_products(token: dict = Depends(verify_token)):
-    return SalesProductsListResponse(items=catalog.list_products())
+async def list_products(
+    name: str | None = None,
+    description: str | None = None,
+    category: str | None = None,
+    min_price: float | None = None,   # in rupees (the unit shown in the UI)
+    max_price: float | None = None,
+    min_stock: int | None = None,
+    max_stock: int | None = None,
+    token: dict = Depends(verify_token),
+):
+    """List products for the admin Products tab, with optional filters. Text
+    filters (name/description) are case-insensitive substring matches; category is
+    exact; price bounds are in rupees (converted to paise); stock bounds are
+    integers. Also returns the distinct category list for the filter dropdown."""
+    def to_minor(value: float | None) -> int | None:
+        return int(round(value * 100)) if value is not None else None
+
+    items = catalog.list_products(
+        name=name,
+        description=description,
+        category=category,
+        min_price_minor=to_minor(min_price),
+        max_price_minor=to_minor(max_price),
+        min_stock=min_stock,
+        max_stock=max_stock,
+    )
+    return SalesProductsListResponse(items=items, categories=catalog.list_all_categories())
 
 
 @router.post("/products", response_model=SalesProductSaveResponse)
@@ -78,11 +103,15 @@ async def get_upload_status(job_id: str, token: dict = Depends(verify_token)):
 
 # ── Meta Commerce Catalog sync ───────────────────────────────────────────────
 @router.post("/catalog/sync", response_model=SalesCatalogSyncResponse)
-async def sync_catalog(token: dict = Depends(verify_token)):
-    result = await asyncio.to_thread(catalog_sync.sync_all)
+async def sync_catalog(full: bool = False, token: dict = Depends(verify_token)):
+    # Default: sync only changed/unsynced products (cheap, idempotent). ?full=true
+    # forces a complete re-push of every active product.
+    fn = catalog_sync.sync_all if full else catalog_sync.sync_changed
+    result = await asyncio.to_thread(fn)
     return SalesCatalogSyncResponse(
         synced=result.get("synced", 0),
         failed=result.get("failed", 0),
+        skipped=result.get("skipped", 0),
         items=catalog.list_products(),
     )
 
