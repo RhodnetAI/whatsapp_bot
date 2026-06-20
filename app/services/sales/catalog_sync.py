@@ -72,9 +72,14 @@ def _product_payload(row: dict[str, Any]) -> dict[str, Any]:
         payload["color"] = row["color"]
     if row.get("model"):
         payload["mpn"] = row["model"]
-    quantity_to_sell = row.get("quantity_to_sell")
-    if quantity_to_sell is not None:
-        payload["inventory"] = int(quantity_to_sell)
+    # Inventory shown in Commerce Manager — reflect the real remaining stock so it
+    # drops after each sale. Prefer ``stock_quantity`` (the shopping-flow stock);
+    # fall back to ``quantity_to_sell``.
+    inventory = row.get("stock_quantity")
+    if inventory is None:
+        inventory = row.get("quantity_to_sell")
+    if inventory is not None:
+        payload["inventory"] = max(0, int(inventory))
 
     return payload
 
@@ -99,6 +104,32 @@ def _sync_one(row: dict[str, Any], access_token: str, catalog_id: str) -> tuple[
     except Exception as exc:
         logger.exception("Catalog sync failed for retailer_id=%s", row.get("retailer_id"))
         return False, str(exc), None
+
+
+def sync_products(product_ids: list[str]) -> dict[str, Any]:
+    """Sync specific products (by id) to the Meta catalog — used after a sale to
+    push the reduced stock so Commerce Manager reflects it. Best-effort: no-op when
+    the catalog isn't configured; per-product failures are recorded in
+    ``sync_status``/``sync_error`` and don't stop the others."""
+    if not is_configured() or not product_ids:
+        return {"synced": 0, "failed": 0}
+    synced = 0
+    failed = 0
+    for product_id in product_ids:
+        row = catalog.get_row(product_id)
+        if not row:
+            continue
+        ok, err, meta_id = _sync_one(row, settings.meta_access_token, settings.meta_catalog_id)
+        update: dict[str, Any] = {
+            "sync_status": "synced" if ok else "failed",
+            "sync_error": "" if ok else err[:500],
+        }
+        if meta_id:
+            update["meta_catalog_id"] = meta_id
+        _db().table(catalog.TABLE).update(update).eq("id", row["id"]).execute()
+        synced += 1 if ok else 0
+        failed += 0 if ok else 1
+    return {"synced": synced, "failed": failed}
 
 
 def sync_all() -> dict[str, Any]:

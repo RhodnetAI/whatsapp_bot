@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.db.supabase_client import first_row, supabase, supabase_admin
-from app.services.sales import cart, catalog
+from app.services.sales import cart, catalog, catalog_sync
 
 logger = logging.getLogger("whatsapp")
 
@@ -224,14 +224,31 @@ def last_shipping_for_sender(sender: str) -> dict[str, Any] | None:
 
 
 def mark_order_paid(order_id: str) -> dict[str, Any] | None:
-    """Idempotency is enforced upstream by the unique sales_payments.event_id.
-    Marks the order paid and decrements stock for its line items."""
+    """Mark the order paid (once), decrement stock for its line items, and push the
+    reduced stock to the Meta catalog. Returns the updated order **only on the real
+    transition** to paid; returns ``None`` if it was already paid or a concurrent
+    paid event won the race — so the caller does NOT send a duplicate confirmation
+    or decrement stock twice. (Razorpay fires several paid events per payment —
+    ``payment.captured`` / ``payment_link.paid`` / ``order.paid`` — each with its
+    own event id, so the per-event idempotency upstream isn't enough on its own.)"""
     order = get_order(order_id)
     if not order:
         return None
     if order.get("status") == "paid":
-        return order
-    _db().table(ORDERS).update({"status": "paid", "payment_status": "paid"}).eq("id", order_id).execute()
+        return None  # already paid (sequential duplicate event) — don't re-notify
+
+    # Atomic guard against simultaneous duplicate events: flip to paid only if not
+    # already paid. If the client returns an empty row set, someone else won.
+    res = (
+        _db().table(ORDERS)
+        .update({"status": "paid", "payment_status": "paid"})
+        .eq("id", order_id)
+        .neq("status", "paid")
+        .execute()
+    )
+    data = getattr(res, "data", None)
+    if data is not None and len(data) == 0:
+        return None
 
     # Cart is emptied only now (on confirmed payment), not at checkout — so an
     # abandoned/unpaid checkout leaves the cart intact for the customer.
@@ -240,6 +257,7 @@ def mark_order_paid(order_id: str) -> dict[str, Any] | None:
     except Exception:
         logger.exception("Could not clear cart for sender after payment")
 
+    sold_product_ids: list[str] = []
     for item in get_order_items(order_id):
         product_id = item.get("product_id")
         if not product_id:
@@ -247,10 +265,28 @@ def mark_order_paid(order_id: str) -> dict[str, Any] | None:
         product = catalog.get_row(product_id)
         if not product:
             continue
+        qty = int(item.get("quantity") or 0)
+        update: dict[str, Any] = {}
+        # Decrement both stock fields so the DB and the Meta inventory both drop.
         stock = product.get("stock_quantity")
         if stock is not None:
-            new_stock = max(0, int(stock) - int(item.get("quantity") or 0))
-            _db().table(catalog.TABLE).update({"stock_quantity": new_stock}).eq("id", product_id).execute()
+            update["stock_quantity"] = max(0, int(stock) - qty)
+        qty_to_sell = product.get("quantity_to_sell")
+        if qty_to_sell is not None:
+            update["quantity_to_sell"] = max(0, int(qty_to_sell) - qty)
+        if update:
+            _db().table(catalog.TABLE).update(update).eq("id", product_id).execute()
+            sold_product_ids.append(str(product_id))
+
+    # Push the reduced stock to the Meta Commerce Catalog so the count drops there
+    # too. Best-effort: a Meta/network failure must never break payment handling,
+    # and it's a no-op when the catalog isn't configured.
+    if sold_product_ids:
+        try:
+            catalog_sync.sync_products(sold_product_ids)
+        except Exception:
+            logger.exception("Post-sale Meta catalog sync failed for order=%s", order_id)
+
     return get_order(order_id)
 
 
