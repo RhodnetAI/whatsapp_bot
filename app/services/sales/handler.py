@@ -18,6 +18,7 @@ on the next message shows the main menu again. Tapping *Main menu* (or typing
 
 import asyncio
 import collections
+import copy
 import json
 import logging
 from datetime import datetime, timezone
@@ -70,13 +71,6 @@ def _idle() -> dict[str, Any]:
 
 def _shopping() -> dict[str, Any]:
     return {"step": "shopping"}
-
-
-def _conv() -> dict[str, Any]:
-    """State for the conversational purchase flow (free-text shopping). Kept
-    distinct from ``shopping`` so follow-up free text stays LLM-guided; button
-    taps fall through to the existing reply handlers exactly as before."""
-    return {"step": "conv_shop"}
 
 
 def _cat_of(row: dict[str, Any]) -> str:
@@ -446,55 +440,396 @@ async def _flow_exit(sender: str, cfg: dict[str, Any]):
     return _menu_messages(cfg, greet=False), _idle()
 
 
-# ── Conversational purchase flow (free-text shopping) ────────────────────────
-async def _handle_conversational(
-    sender: str, text: str, cfg: dict[str, Any], conversation_data: list[dict[str, Any]]
-):
-    """Free-typed message that the existing flow would have bounced to the menu.
-    Detect shopping intent and guide the customer toward the existing cart →
-    checkout → payment path, entirely through chat messages. The product cards /
-    category lists and every button (➕ Add to cart, 🛒 Cart, ✅ Checkout, …) are
-    reused from the existing handlers, so the payment flow is unchanged."""
-    result = await conversational.classify(text, conversation_data, cfg)
-    intent = result.get("intent")
+# ══ Path C — fully conversational, text-only purchase flow ═══════════════════
+# Every message here is plain text (no buttons/lists/Flow); the single exception
+# is the payment hand-off, which reuses _send_payment_link's CTA-URL. State (cart,
+# selected categories, pending quantities, address, order number) lives on
+# sales_state — no DB cart; an order is created only at confirmation. The LLM logic
+# (entry intent + the per-turn interpreter) lives in conversational.py. See
+# docs/Conversational Sales Flow (Path C).md (§14).
 
-    # General / unrelated message → the requested polite redirect; stay idle so
-    # greetings and the main menu keep working exactly as before.
+CONV_STEPS = {"conv_categories", "conv_products", "conv_confirm", "conv_address", "conv_payment"}
+_CONV_MAX_PRODUCTS = 40  # also matches conversational._shown_block numbering
+
+
+# ── Text renderers (plain text only) ─────────────────────────────────────────
+def _render_categories_msgs(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    cats = conversational.active_categories()
+    if not cats:
+        return [m.text("No products are available right now. Please check back soon.")]
+    lines = [f"{i + 1}. {c}" for i, c in enumerate(cats)]
+    body = (
+        "🛍️ Here's what we sell. Tell me what you're interested in — you can name one or several:\n\n"
+        + "\n".join(lines)
+        + "\n\nFor example: \"I'm looking for footwear and something electronic.\""
+    )
+    return [m.text(body)]
+
+
+def _render_products_msgs(state: dict[str, Any], cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = conversational.products_in_categories(state.get("selected_categories") or [])
+    if not rows:
+        return [m.text(
+            "I couldn't find products in that category. Tell me another category, "
+            "or say \"show me everything\"."
+        )]
+    shown = rows[:_CONV_MAX_PRODUCTS]
+    lines = ["Great — here's what we have:"]
+    current = None
+    for i, r in enumerate(shown):
+        cat = _cat_of(r)
+        if cat != current:
+            lines.append(f"\n*{cat}*")
+            current = cat
+        price = m.format_money(r.get("price_minor") or 0, r.get("currency") or cfg["currency"])
+        stock = r.get("stock_quantity")
+        avail = " — out of stock" if (stock is not None and int(stock) <= 0) else ""
+        lines.append(f"{i + 1}. {r.get('name')} — {price}{avail}")
+    if len(rows) > _CONV_MAX_PRODUCTS:
+        lines.append(f"\n…and {len(rows) - _CONV_MAX_PRODUCTS} more — narrow down by category if you like.")
+    lines.append(
+        "\nTell me which ones and how many — e.g. \"2 of number 1 and one speaker\". "
+        "You can also ask me anything about them."
+    )
+    return [m.text("\n".join(lines))]
+
+
+def _cart_summary_msg(state: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
+    cart = state.get("cart") or []
+    if not cart:
+        return m.text("Your selection is empty. Tell me what you'd like, or say \"show me the products\".")
+    lines = ["🛒 Here's your order so far:"]
+    subtotal = 0
+    for it in cart:
+        line_total = int(it["unit_price_minor"]) * int(it["quantity"])
+        subtotal += line_total
+        lines.append(f"• {it['name']} ×{it['quantity']} — {m.format_money(line_total, cfg['currency'])}")
+    lines.append(f"\nSubtotal: {m.format_money(subtotal, cfg['currency'])}")
+    lines.append(
+        "\nReply *confirm* to continue to delivery, or tell me what to change "
+        "(e.g. \"make the shoes 1\", \"remove the earbuds\", \"add a speaker\")."
+    )
+    return m.text("\n".join(lines))
+
+
+def _ask_quantity_msg(state: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
+    pending = state.get("pending_quantity") or []
+    if len(pending) == 1:
+        return m.text(f"How many *{pending[0]['name']}* would you like?")
+    names = ", ".join(p.get("name") or "" for p in pending) or "those items"
+    return m.text(f"How many of each would you like? ({names})")
+
+
+def _ask_address_msg(state: dict[str, Any]) -> dict[str, Any]:
+    addr = state.get("address") or {}
+    missing = [f for f in ("name", "address", "city", "pincode") if not addr.get(f)]
+    if addr and 0 < len(missing) < 4:
+        labels = {"name": "full name", "address": "address", "city": "city", "pincode": "pincode"}
+        return m.text("Thanks! I still need your " + ", ".join(labels[x] for x in missing) + ".")
+    return m.text("Almost there! Please send your delivery details:\nName, full address, city, and pincode.")
+
+
+async def _represent_step(sender: str, state: dict[str, Any], cfg: dict[str, Any]):
+    """Re-present the current step from state (used after a doubt / unrelated
+    message so nothing is ever lost)."""
+    step = state.get("step")
+    if step == "conv_categories":
+        return _render_categories_msgs(cfg), state
+    if step == "conv_products":
+        if state.get("pending_quantity"):
+            return [_ask_quantity_msg(state, cfg)], state
+        return _render_products_msgs(state, cfg), state
+    if step == "conv_confirm":
+        return [_cart_summary_msg(state, cfg)], state
+    if step == "conv_address":
+        return [_ask_address_msg(state)], state
+    if step == "conv_payment":
+        msgs, st = await _resend_payment(sender, state, cfg)
+        # Keep conv_payment unless the order is paid/gone (then _resend_payment
+        # already returns an idle/menu state — propagate it).
+        return msgs, (state if st.get("step") == "awaiting_payment" else st)
+    return _menu_messages(cfg, greet=False), _idle()
+
+
+# ── Session cart helpers (held in sales_state, not the DB) ───────────────────
+def _cart_add(state: dict[str, Any], product_id: str, qty: int, cfg: dict[str, Any]) -> None:
+    row = catalog.get_row(product_id)
+    if not row or not row.get("is_active", True):
+        return
+    cart = state.setdefault("cart", [])
+    for it in cart:
+        if it["product_id"] == product_id:
+            it["quantity"] = int(it["quantity"]) + int(qty)
+            return
+    cart.append({
+        "product_id": product_id,
+        "name": row.get("name") or "Item",
+        "quantity": int(qty),
+        "unit_price_minor": catalog.effective_unit_price_minor(row),
+    })
+
+
+def _cart_set_qty(state: dict[str, Any], product_id: str, qty: int) -> None:
+    for it in state.get("cart") or []:
+        if it["product_id"] == product_id:
+            if int(qty) <= 0:
+                _sess_cart_remove(state, product_id)
+            else:
+                it["quantity"] = int(qty)
+            return
+
+
+def _sess_cart_remove(state: dict[str, Any], product_id: str) -> None:
+    state["cart"] = [it for it in (state.get("cart") or []) if it["product_id"] != product_id]
+
+
+def _queue_quantity(state: dict[str, Any], product_id: str) -> None:
+    row = catalog.get_row(product_id)
+    if not row:
+        return
+    pending = state.setdefault("pending_quantity", [])
+    if not any(p["product_id"] == product_id for p in pending):
+        pending.append({"product_id": product_id, "name": row.get("name") or "Item"})
+
+
+def _ingest_items(state: dict[str, Any], items: list[dict[str, Any]], cfg: dict[str, Any]) -> None:
+    """Add items with a stated quantity to the cart; queue those without one for a
+    quantity question (§14.3)."""
+    for it in items:
+        pid = it.get("product_id")
+        qty = it.get("quantity")
+        if not pid:
+            continue
+        if qty:
+            _cart_add(state, pid, int(qty), cfg)
+            state["pending_quantity"] = [p for p in state.get("pending_quantity", []) if p["product_id"] != pid]
+        else:
+            _queue_quantity(state, pid)
+
+
+def _apply_cart_edits(decision: dict[str, Any], state: dict[str, Any], cfg: dict[str, Any]) -> None:
+    for qu in decision.get("quantity_updates") or []:
+        _cart_set_qty(state, qu["product_id"], qu["quantity"])
+    for pid in decision.get("removals") or []:
+        _sess_cart_remove(state, pid)
+    for rp in decision.get("replacements") or []:
+        _sess_cart_remove(state, rp["from_id"])
+        if rp.get("quantity"):
+            _cart_add(state, rp["to_id"], int(rp["quantity"]), cfg)
+        else:
+            _queue_quantity(state, rp["to_id"])
+
+
+def _merge_categories(state: dict[str, Any], categories: list[str]) -> None:
+    merged = state.setdefault("selected_categories", [])
+    for c in categories:
+        if c not in merged:
+            merged.append(c)
+
+
+def _after_mutation(state: dict[str, Any], cfg: dict[str, Any]):
+    """Decide where the customer lands after a cart change: ask for a pending
+    quantity, go back to products if the cart emptied, else show the summary."""
+    if state.get("pending_quantity"):
+        state["step"] = "conv_products"
+        return [_ask_quantity_msg(state, cfg)], state
+    if not state.get("cart"):
+        state["step"] = "conv_products"
+        return _render_products_msgs(state, cfg), state
+    state["step"] = "conv_confirm"
+    return [_cart_summary_msg(state, cfg)], state
+
+
+# ── Entry (idle free text → buy vs unrelated) ────────────────────────────────
+async def _conv_entry(sender: str, text: str, cfg: dict[str, Any], conversation_data: list[dict[str, Any]]):
+    intent = await conversational.classify_entry(text, conversation_data, cfg)
+    if intent != "buy":
+        return [m.text(conversational.SORRY_MESSAGE)], _idle()
+    if not conversational.active_categories():
+        return [m.text("No products are available right now. Please check back soon."), _main_menu(cfg)], _idle()
+    state = {"step": "conv_categories", "selected_categories": [], "cart": [], "pending_quantity": []}
+    return _render_categories_msgs(cfg), state
+
+
+# ── go back ──────────────────────────────────────────────────────────────────
+def _go_back(target: str, state: dict[str, Any], cfg: dict[str, Any]):
+    if target == "conv_categories":
+        state["step"] = "conv_categories"
+        return _render_categories_msgs(cfg), state
+    if target == "conv_products":
+        state["step"] = "conv_products"
+        return _render_products_msgs(state, cfg), state
+    if target == "conv_confirm":
+        state["step"] = "conv_confirm"
+        return [_cart_summary_msg(state, cfg)], state
+    return None
+
+
+# ── Per-step appliers ────────────────────────────────────────────────────────
+def _apply_categories(decision: dict[str, Any], state: dict[str, Any], cfg: dict[str, Any]):
+    if decision["intent"] in ("select", "add_more", "confirm") and decision.get("categories"):
+        _merge_categories(state, decision["categories"])
+        state["step"] = "conv_products"
+        return _render_products_msgs(state, cfg), state
+    return [m.text("Tell me which category you'd like — name one or more from the list.")] \
+        + _render_categories_msgs(cfg), state
+
+
+def _apply_cart_mutations(decision: dict[str, Any], state: dict[str, Any], cfg: dict[str, Any]) -> bool:
+    """Apply any item additions / quantity changes / removals / replacements from
+    the decision. Returns True if the cart (or pending list) changed."""
+    mutated = False
+    if decision.get("items"):
+        _ingest_items(state, decision["items"], cfg)
+        mutated = True
+    if decision.get("quantity_updates") or decision.get("removals") or decision.get("replacements"):
+        _apply_cart_edits(decision, state, cfg)
+        mutated = True
+    return mutated
+
+
+def _apply_products(decision: dict[str, Any], state: dict[str, Any], cfg: dict[str, Any]):
+    intent = decision["intent"]
+    # Always honour product picks/edits first — even when intent is "add_more" and
+    # the model also echoed a category (it ignores the items otherwise).
+    mutated = _apply_cart_mutations(decision, state, cfg)
+    if decision.get("categories"):
+        before = list(state.get("selected_categories") or [])
+        _merge_categories(state, decision["categories"])
+        if not mutated and state.get("selected_categories") != before:
+            return _render_products_msgs(state, cfg), state
+    if mutated:
+        return _after_mutation(state, cfg)
+    if intent == "confirm" and state.get("cart"):
+        state["step"] = "conv_confirm"
+        return [_cart_summary_msg(state, cfg)], state
+    return _render_products_msgs(state, cfg), state
+
+
+async def _apply_confirm(decision: dict[str, Any], state: dict[str, Any], cfg: dict[str, Any], sender: str):
+    intent = decision["intent"]
+    mutated = _apply_cart_mutations(decision, state, cfg)
+    if decision.get("categories"):
+        before = list(state.get("selected_categories") or [])
+        _merge_categories(state, decision["categories"])
+        if not mutated and state.get("selected_categories") != before:
+            state["step"] = "conv_products"
+            return _render_products_msgs(state, cfg), state
+    if mutated:
+        return _after_mutation(state, cfg)
+    if intent == "confirm":
+        return await _conv_create_order(sender, state, cfg)
+    return [_cart_summary_msg(state, cfg)], state
+
+
+async def _conv_create_order(sender: str, state: dict[str, Any], cfg: dict[str, Any]):
+    cart = state.get("cart") or []
+    if not cart:
+        state["step"] = "conv_products"
+        return _render_products_msgs(state, cfg), state
+    specs = [{"product_id": i["product_id"], "quantity": i["quantity"]} for i in cart]
+    order, notes = orders.create_order(sender, specs, cfg)
+    if not order:
+        state["step"] = "conv_products"
+        return [m.text("Those items aren't available anymore. Let's pick again.")] \
+            + _render_products_msgs(state, cfg), state
+    state["order_number"] = order["order_number"]
+    state.setdefault("address", {})
+    state["step"] = "conv_address"
+    msgs: list[dict[str, Any]] = []
+    if notes:
+        msgs.append(m.text("\n".join(notes)))
+    msgs.append(m.text(_order_summary_text(order, cfg)))
+    msgs.append(_ask_address_msg(state))
+    return msgs, state
+
+
+async def _apply_address(decision: dict[str, Any], state: dict[str, Any], cfg: dict[str, Any], sender: str, text: str):
+    extracted = await conversational.extract_address(text, state.get("address") or {})
+    addr = state.setdefault("address", {})
+    for k in ("name", "address", "city", "pincode"):
+        v = (extracted.get(k) or "").strip()
+        if v:
+            addr[k] = v
+    if [k for k in ("name", "address", "city", "pincode") if not addr.get(k)]:
+        return [_ask_address_msg(state)], state
+    return await _conv_send_payment(sender, state, cfg)
+
+
+async def _conv_send_payment(sender: str, state: dict[str, Any], cfg: dict[str, Any]):
+    order = orders.get_order_by_number(state.get("order_number", "")) or orders.latest_order_for_sender(sender)
+    if not order:
+        return await _conv_create_order(sender, state, cfg)
+    addr = state.get("address") or {}
+    orders.set_customer_details(
+        order["id"], addr.get("name") or "Customer", sender,
+        {"address": addr.get("address", ""), "city": addr.get("city", ""), "pincode": addr.get("pincode", "")},
+    )
+    order = orders.get_order(order["id"]) or order
+    order["items"] = orders.get_order_items(order["id"])
+    pay_msgs, pay_state = await _send_payment_link(sender, order, cfg)
+    if pay_state.get("step") == "awaiting_payment":
+        state["step"] = "conv_payment"
+        return pay_msgs, state
+    # Payments disabled / link failed → existing graceful message, flow closes.
+    return pay_msgs, _idle()
+
+
+async def _apply_payment(decision: dict[str, Any], state: dict[str, Any], cfg: dict[str, Any], sender: str):
+    intent = decision["intent"]
+    has_edit = bool(
+        decision.get("items") or decision.get("quantity_updates")
+        or decision.get("removals") or decision.get("replacements") or decision.get("categories")
+    )
+    if intent in ("change_quantity", "remove", "replace", "add_more", "select") and has_edit:
+        if decision.get("categories"):
+            _merge_categories(state, decision["categories"])
+        if decision.get("items"):
+            _ingest_items(state, decision["items"], cfg)
+        _apply_cart_edits(decision, state, cfg)
+        return _after_mutation(state, cfg)
+    return await _represent_step(sender, state, cfg)
+
+
+# ── The unified per-turn dispatcher ──────────────────────────────────────────
+async def _handle_conv_turn(sender: str, text: str, prev_state: dict[str, Any],
+                            cfg: dict[str, Any], conversation_data: list[dict[str, Any]]):
+    state = copy.deepcopy(prev_state)
+    step = state.get("step") or ""
+    decision = await conversational.interpret_turn(step, text, state, conversation_data, cfg)
+    intent = decision.get("intent")
+
+    if intent == "cancel":
+        return [m.text("No problem — I've stopped that. Type *menu* whenever you'd like to start again.")], _idle()
+    if intent == "answer_doubt":
+        answer = (decision.get("answer") or "").strip() or "Happy to help — could you say a bit more?"
+        rep, st = await _represent_step(sender, state, cfg)
+        return [m.text(answer), *rep], st
+    if intent == "go_back" and decision.get("target_step"):
+        back = _go_back(decision["target_step"], state, cfg)
+        if back is not None:
+            return back
+
+    # The address step treats any non-(doubt/cancel/go_back) message as address
+    # input, so a typed address is never mistaken for an "unrelated" message.
+    if step == "conv_address":
+        return await _apply_address(decision, state, cfg, sender, text)
+
     if intent == "unrelated":
-        body = (
-            conversational.SORRY_MESSAGE
-            + "\n\nTell me what you'd like to buy, or type *menu* to see options."
-        )
-        return [m.text(body)], _idle()
+        rep, st = await _represent_step(sender, state, cfg)
+        return [m.text(conversational.SORRY_MESSAGE), *rep], st
 
-    reply = (result.get("reply") or "").strip()
+    if step == "conv_categories":
+        return _apply_categories(decision, state, cfg)
+    if step == "conv_products":
+        return _apply_products(decision, state, cfg)
+    if step == "conv_confirm":
+        return await _apply_confirm(decision, state, cfg, sender)
+    if step == "conv_payment":
+        return await _apply_payment(decision, state, cfg, sender)
 
-    # Specific product suggestions → render existing product cards.
-    cards: list[dict[str, Any]] = []
-    for pid in result.get("product_ids") or []:
-        row = catalog.get_row(pid)
-        if row and row.get("is_active", True):
-            cards.append(_product_card(row, cfg))
-    if cards:
-        intro = reply or "Here are some options you might like:"
-        nav = _nav_list("Tap *➕ Add to cart* or *ℹ️ Details*, or tell me more about what you want.")
-        return [m.text(intro), *cards, nav], _conv()
-
-    # A matched category → reuse the existing category screen.
-    category = result.get("category")
-    if category:
-        msgs, _state = await _browse_category(sender, category, cfg)
-        if reply:
-            msgs = [m.text(reply), *msgs]
-        return msgs, _conv()
-
-    # Vague intent ("show me what you have") → reuse the existing guided browse.
-    msgs, state = await _browse_categories(sender, cfg)
-    if reply:
-        msgs = [m.text(reply), *msgs]
-    # _browse_categories returns idle only when there are no products; otherwise
-    # keep the customer in the conversational flow.
-    return msgs, (state if state.get("step") == "idle" else _conv())
+    rep, st = await _represent_step(sender, state, cfg)
+    return rep, st
 
 
 # ── Talk to AI (LLM Q&A over the catalog) ────────────────────────────────────
@@ -868,13 +1203,17 @@ async def _route(sender: str, parsed: dict[str, Any], state: dict[str, Any], con
             return await _handle_track(sender, parsed["text"], cfg)
         if step == "awaiting_payment":
             return await _resend_payment(sender, state, cfg)
+        # Path C (text-only conversational flow): an in-flow turn is owned by the
+        # unified interpreter — even greeting-like words are interpreted, not
+        # treated as a menu escape (only MENU_EXIT_WORDS escapes, handled above).
+        if step in CONV_STEPS:
+            return await _handle_conv_turn(sender, raw, state, cfg, conversation_data)
         if t in GREETINGS:
             return _menu_messages(cfg, greet=True), _idle()
         # Free-typed message that isn't a greeting/command and isn't inside an
-        # existing step (idle entry, or a conv_shop follow-up) → conversational
-        # purchase flow. Everything above (menu, Open Store, Talk to AI, the
-        # existing steps) is left exactly as it was.
-        return await _handle_conversational(sender, raw, cfg, conversation_data)
+        # existing step → Path C entry (intent check). Everything above (menu,
+        # Open Store, Talk to AI, the existing steps) is left exactly as it was.
+        return await _conv_entry(sender, raw, cfg, conversation_data)
 
     return _menu_messages(cfg, greet=False), _idle()
 
