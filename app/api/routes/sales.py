@@ -174,6 +174,7 @@ async def list_orders(include_drafts: bool = False, token: dict = Depends(verify
                 customer_phone=order.get("customer_phone") or "",
                 shipping_address=address if isinstance(address, dict) else {},
                 payment_status=order.get("payment_status") or "created",
+                razorpay_payment_link_url=order.get("razorpay_payment_link_url"),
                 created_at=order.get("created_at"),
                 items=items,
             )

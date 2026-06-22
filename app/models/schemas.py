@@ -402,6 +402,7 @@ class SalesOrderOut(BaseModel):
     customer_phone: str = ""
     shipping_address: dict = {}
     payment_status: str = "created"
+    razorpay_payment_link_url: Optional[str] = None
     created_at: Optional[str] = None
     items: list[SalesOrderItemOut] = []
 
