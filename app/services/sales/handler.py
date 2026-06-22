@@ -583,6 +583,22 @@ def _sess_cart_remove(state: dict[str, Any], product_id: str) -> None:
     state["cart"] = [it for it in (state.get("cart") or []) if it["product_id"] != product_id]
 
 
+def _cart_put(state: dict[str, Any], product_id: str, qty: int, cfg: dict[str, Any]) -> None:
+    """SET a product's line quantity to ``qty`` (add the line if absent). Used for
+    selections so the model re-stating an existing cart item is a no-op rather than
+    doubling it — the LLM tends to echo the whole cart on edit/confirm turns."""
+    for it in state.get("cart") or []:
+        if it["product_id"] == product_id:
+            it["quantity"] = int(qty)
+            return
+    _cart_add(state, product_id, int(qty), cfg)
+
+
+def _cart_snapshot(state: dict[str, Any]) -> list[tuple[str, int]]:
+    """Order-independent view of the cart, to tell whether a turn changed it."""
+    return sorted((i["product_id"], int(i["quantity"])) for i in state.get("cart") or [])
+
+
 def _queue_quantity(state: dict[str, Any], product_id: str) -> None:
     row = catalog.get_row(product_id)
     if not row:
@@ -601,7 +617,7 @@ def _ingest_items(state: dict[str, Any], items: list[dict[str, Any]], cfg: dict[
         if not pid:
             continue
         if qty:
-            _cart_add(state, pid, int(qty), cfg)
+            _cart_put(state, pid, int(qty), cfg)
             state["pending_quantity"] = [p for p in state.get("pending_quantity", []) if p["product_id"] != pid]
         else:
             _queue_quantity(state, pid)
@@ -688,36 +704,68 @@ def _apply_cart_mutations(decision: dict[str, Any], state: dict[str, Any], cfg: 
     return mutated
 
 
-def _apply_products(decision: dict[str, Any], state: dict[str, Any], cfg: dict[str, Any]):
-    intent = decision["intent"]
-    # Always honour product picks/edits first — even when intent is "add_more" and
-    # the model also echoed a category (it ignores the items otherwise).
-    mutated = _apply_cart_mutations(decision, state, cfg)
+_AFFIRMATIONS = {
+    "confirm", "confirmed", "yes", "yep", "yeah", "ya", "yup", "y", "ok", "okay", "k",
+    "sure", "proceed", "checkout", "check out", "place order", "place the order",
+    "go ahead", "done", "that's all", "thats all", "finalize", "pay", "buy", "buy now",
+}
+
+
+def _is_affirmation(message: str) -> bool:
+    """A clear, short confirmation to proceed — used so a plain 'confirm'/'yes'
+    creates the order even when the model spuriously emits edits on that turn.
+    Deliberately conservative: longer messages (which may contain real edits) are
+    left to the LLM/edit path."""
+    t = (message or "").strip().lower().strip(".!?, ")
+    if not t:
+        return False
+    if t in _AFFIRMATIONS:
+        return True
+    words = t.split()
+    return len(words) <= 2 and words[0] in _AFFIRMATIONS
+
+
+def _apply_changes(decision: dict[str, Any], state: dict[str, Any], cfg: dict[str, Any]) -> tuple[bool, bool]:
+    """Apply item/cart edits and any newly-named categories. Returns
+    ``(cart_changed, categories_changed)`` measured against real before/after
+    snapshots — so an echoed (unchanged) cart doesn't count as a change."""
+    cart_before = _cart_snapshot(state)
+    _apply_cart_mutations(decision, state, cfg)
+    cart_changed = _cart_snapshot(state) != cart_before
+
+    cats_before = list(state.get("selected_categories") or [])
     if decision.get("categories"):
-        before = list(state.get("selected_categories") or [])
         _merge_categories(state, decision["categories"])
-        if not mutated and state.get("selected_categories") != before:
-            return _render_products_msgs(state, cfg), state
-    if mutated:
+    cats_changed = list(state.get("selected_categories") or []) != cats_before
+    return cart_changed, cats_changed
+
+
+def _apply_products(decision: dict[str, Any], state: dict[str, Any], cfg: dict[str, Any]):
+    cart_changed, cats_changed = _apply_changes(decision, state, cfg)
+    if cart_changed:
         return _after_mutation(state, cfg)
-    if intent == "confirm" and state.get("cart"):
+    if cats_changed:
+        return _render_products_msgs(state, cfg), state
+    if decision["intent"] == "confirm" and state.get("cart"):
         state["step"] = "conv_confirm"
         return [_cart_summary_msg(state, cfg)], state
     return _render_products_msgs(state, cfg), state
 
 
-async def _apply_confirm(decision: dict[str, Any], state: dict[str, Any], cfg: dict[str, Any], sender: str):
-    intent = decision["intent"]
-    mutated = _apply_cart_mutations(decision, state, cfg)
-    if decision.get("categories"):
-        before = list(state.get("selected_categories") or [])
-        _merge_categories(state, decision["categories"])
-        if not mutated and state.get("selected_categories") != before:
-            state["step"] = "conv_products"
-            return _render_products_msgs(state, cfg), state
-    if mutated:
+async def _apply_confirm(decision: dict[str, Any], state: dict[str, Any], cfg: dict[str, Any],
+                         sender: str, message: str):
+    # A clear "confirm"/"yes" creates the order from the current cart, ignoring any
+    # spurious edits the model emits on that turn (it sometimes removes/echoes items).
+    if _is_affirmation(message) and state.get("cart"):
+        return await _conv_create_order(sender, state, cfg)
+    cart_changed, cats_changed = _apply_changes(decision, state, cfg)
+    if cart_changed:
         return _after_mutation(state, cfg)
-    if intent == "confirm":
+    if cats_changed:
+        state["step"] = "conv_products"
+        return _render_products_msgs(state, cfg), state
+    # Non-keyword confirmation with no real change (e.g. "looks good, let's do it").
+    if decision["intent"] == "confirm" and state.get("cart"):
         return await _conv_create_order(sender, state, cfg)
     return [_cart_summary_msg(state, cfg)], state
 
@@ -824,7 +872,7 @@ async def _handle_conv_turn(sender: str, text: str, prev_state: dict[str, Any],
     if step == "conv_products":
         return _apply_products(decision, state, cfg)
     if step == "conv_confirm":
-        return await _apply_confirm(decision, state, cfg, sender)
+        return await _apply_confirm(decision, state, cfg, sender, text)
     if step == "conv_payment":
         return await _apply_payment(decision, state, cfg, sender)
 

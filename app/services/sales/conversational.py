@@ -253,6 +253,9 @@ def _build_messages(step: str, message: str, state: dict[str, Any],
         "or its shown number (preferred) — never invent one.\n"
         "- When they name or refer to a product (by name, number, or description), put it in \"items\"; "
         "set quantity to null if they didn't state one.\n"
+        "- Only include in \"items\"/\"removals\"/\"quantity_updates\" the products the user is changing in "
+        "THIS message. Do NOT echo items already in the cart that they didn't mention.\n"
+        "- A \"quantity\" in items is the TOTAL desired for that line, not an amount to add.\n"
         "- intent=answer_doubt for any question/comparison/clarification (about products, categories, "
         "prices, their order); put the full answer in \"answer\". Do NOT change their selections.\n"
         "- intent=confirm ONLY when they clearly approve proceeding (e.g. 'confirm', 'yes go ahead', "
@@ -381,8 +384,11 @@ def _augment(step: str, message: str, state: dict[str, Any],
     is_question = intent == "answer_doubt" and "?" in (message or "")
 
     if step == "conv_categories":
-        if not decision["categories"] and not is_question:
-            cats = _keyword_categories(message)
+        # Naming a category at the category step is navigation, not a doubt —
+        # unless it's an actual question (has '?'). Honour it even if the model
+        # mislabelled it (e.g. as answer_doubt).
+        if not is_question:
+            cats = decision["categories"] or _keyword_categories(message)
             if cats:
                 decision["intent"] = "select"
                 decision["categories"] = cats
