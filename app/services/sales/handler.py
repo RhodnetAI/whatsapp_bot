@@ -27,7 +27,7 @@ from app.core.config import settings
 from app.db.supabase_client import first_row, supabase, supabase_admin
 from app.services.whatsapp import send_whatsapp_message, send_whatsapp_typing_indicator
 from app.services.sales import ai_chat, messaging as m
-from app.services.sales import cart, catalog, orders, razorpay_service
+from app.services.sales import cart, catalog, conversational, orders, razorpay_service
 
 logger = logging.getLogger("whatsapp")
 
@@ -70,6 +70,13 @@ def _idle() -> dict[str, Any]:
 
 def _shopping() -> dict[str, Any]:
     return {"step": "shopping"}
+
+
+def _conv() -> dict[str, Any]:
+    """State for the conversational purchase flow (free-text shopping). Kept
+    distinct from ``shopping`` so follow-up free text stays LLM-guided; button
+    taps fall through to the existing reply handlers exactly as before."""
+    return {"step": "conv_shop"}
 
 
 def _cat_of(row: dict[str, Any]) -> str:
@@ -437,6 +444,57 @@ async def _do_search(sender: str, query: str, cfg: dict[str, Any]):
 
 async def _flow_exit(sender: str, cfg: dict[str, Any]):
     return _menu_messages(cfg, greet=False), _idle()
+
+
+# ── Conversational purchase flow (free-text shopping) ────────────────────────
+async def _handle_conversational(
+    sender: str, text: str, cfg: dict[str, Any], conversation_data: list[dict[str, Any]]
+):
+    """Free-typed message that the existing flow would have bounced to the menu.
+    Detect shopping intent and guide the customer toward the existing cart →
+    checkout → payment path, entirely through chat messages. The product cards /
+    category lists and every button (➕ Add to cart, 🛒 Cart, ✅ Checkout, …) are
+    reused from the existing handlers, so the payment flow is unchanged."""
+    result = await conversational.classify(text, conversation_data, cfg)
+    intent = result.get("intent")
+
+    # General / unrelated message → the requested polite redirect; stay idle so
+    # greetings and the main menu keep working exactly as before.
+    if intent == "unrelated":
+        body = (
+            conversational.SORRY_MESSAGE
+            + "\n\nTell me what you'd like to buy, or type *menu* to see options."
+        )
+        return [m.text(body)], _idle()
+
+    reply = (result.get("reply") or "").strip()
+
+    # Specific product suggestions → render existing product cards.
+    cards: list[dict[str, Any]] = []
+    for pid in result.get("product_ids") or []:
+        row = catalog.get_row(pid)
+        if row and row.get("is_active", True):
+            cards.append(_product_card(row, cfg))
+    if cards:
+        intro = reply or "Here are some options you might like:"
+        nav = _nav_list("Tap *➕ Add to cart* or *ℹ️ Details*, or tell me more about what you want.")
+        return [m.text(intro), *cards, nav], _conv()
+
+    # A matched category → reuse the existing category screen.
+    category = result.get("category")
+    if category:
+        msgs, _state = await _browse_category(sender, category, cfg)
+        if reply:
+            msgs = [m.text(reply), *msgs]
+        return msgs, _conv()
+
+    # Vague intent ("show me what you have") → reuse the existing guided browse.
+    msgs, state = await _browse_categories(sender, cfg)
+    if reply:
+        msgs = [m.text(reply), *msgs]
+    # _browse_categories returns idle only when there are no products; otherwise
+    # keep the customer in the conversational flow.
+    return msgs, (state if state.get("step") == "idle" else _conv())
 
 
 # ── Talk to AI (LLM Q&A over the catalog) ────────────────────────────────────
@@ -812,7 +870,11 @@ async def _route(sender: str, parsed: dict[str, Any], state: dict[str, Any], con
             return await _resend_payment(sender, state, cfg)
         if t in GREETINGS:
             return _menu_messages(cfg, greet=True), _idle()
-        return _menu_messages(cfg, greet=False), _idle()
+        # Free-typed message that isn't a greeting/command and isn't inside an
+        # existing step (idle entry, or a conv_shop follow-up) → conversational
+        # purchase flow. Everything above (menu, Open Store, Talk to AI, the
+        # existing steps) is left exactly as it was.
+        return await _handle_conversational(sender, raw, cfg, conversation_data)
 
     return _menu_messages(cfg, greet=False), _idle()
 
