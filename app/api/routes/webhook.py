@@ -25,6 +25,7 @@ from app.services.flow_ai import (
 from app.services.rag import classify_knowledge_lead_label
 from app.services.meeting_booking import (
     BOOKING_FLOW_STEPS,
+    fresh_meeting_state,
     get_meeting_state,
     handle_yes_no_response,
     is_suppressed_for_session,
@@ -32,7 +33,12 @@ from app.services.meeting_booking import (
     save_booking,
     set_meeting_state,
 )
-from app.services.email_service import build_booking_body, send_flow_completion_email, send_meeting_confirmation
+from app.services.email_service import (
+    build_booking_body,
+    build_flow_completion_body,
+    send_flow_completion_email,
+    send_meeting_confirmation,
+)
 from app.services.meet_service import create_meeting_event
 
 
@@ -105,13 +111,15 @@ async def _generate_response_and_update(
     db_client = _conversation_client()
 
     try:
-        # ── Load flow builder ──────────────────────────────────────────────
+        # ── Load flow builder + admin notification toggles ──────────────────
         flow_builder = None
         flow_creation_enabled = False
+        flow_notify_whatsapp = False
+        flow_notify_email = False
         try:
             flow_res = (
                 db_client.table("information_bot")
-                .select("flow_builder, flow_creation_enabled")
+                .select("flow_builder, flow_creation_enabled, flow_notify_whatsapp_enabled, flow_notify_email_enabled")
                 .eq("id", 1)
                 .limit(1)
                 .execute()
@@ -120,6 +128,8 @@ async def _generate_response_and_update(
             if isinstance(flow_row, dict):
                 flow_builder = flow_row.get("flow_builder")
                 flow_creation_enabled = bool(flow_row.get("flow_creation_enabled"))
+                flow_notify_whatsapp = bool(flow_row.get("flow_notify_whatsapp_enabled"))
+                flow_notify_email = bool(flow_row.get("flow_notify_email_enabled"))
         except Exception:
             logger.exception("Failed to load flow builder state")
 
@@ -202,6 +212,24 @@ async def _generate_response_and_update(
                 logger.exception("Failed to load scheduler_enabled for sender=%s", sender)
 
             meeting_state = get_meeting_state(conversation_data) if scheduler_enabled else None
+
+            # A "session" is one calendar day (UTC), derived from prior entries
+            # in whatsapp_conversations — same definition as is_first_message_of_session
+            # below. Reset any already-consumed suggestion (declined / completed /
+            # exhausted-unanswered) at the start of a new day so the user gets a
+            # fresh scheduling opportunity each day. Active mid-flow steps
+            # (BOOKING_FLOW_STEPS) are left untouched so an in-progress booking
+            # never gets wiped out by a midnight rollover.
+            if (
+                scheduler_enabled
+                and meeting_state
+                and meeting_state["step"] not in BOOKING_FLOW_STEPS
+                and meeting_state.get("suggestion_count", 0) > 0
+            ):
+                prior_entries = conversation_data[:-1] if conversation_data else []
+                if is_first_message_of_session(prior_entries):
+                    meeting_state = fresh_meeting_state()
+                    set_meeting_state(conversation_data, meeting_state)
 
             # ── Pure booking-flow step (no normal AI) ──────────────────────
             if scheduler_enabled and meeting_state and meeting_state["step"] in BOOKING_FLOW_STEPS:
@@ -441,14 +469,34 @@ async def _generate_response_and_update(
                 )
 
             if confirmation_payload is not None:
-                try:
-                    await asyncio.to_thread(
-                        send_flow_completion_email,
-                        sender=sender,
-                        questions=confirmation_payload.get("questions", []),
-                    )
-                except Exception:
-                    logger.exception("Failed to send flow completion email for sender=%s", sender)
+                questions = confirmation_payload.get("questions", [])
+
+                if flow_notify_email:
+                    try:
+                        await asyncio.to_thread(
+                            send_flow_completion_email,
+                            sender=sender,
+                            questions=questions,
+                            email_enabled=True,
+                        )
+                    except Exception:
+                        logger.exception("Failed to send flow completion email for sender=%s", sender)
+
+                if flow_notify_whatsapp and settings.admin_whatsapp_number:
+                    try:
+                        flow_whatsapp_summary = build_flow_completion_body(sender, questions)
+                        flow_resp = send_whatsapp_text(settings.admin_whatsapp_number, flow_whatsapp_summary)
+                        if flow_resp.status_code >= 400:
+                            logger.error(
+                                "Admin WhatsApp flow notification rejected sender=%s status=%s body=%s",
+                                sender, flow_resp.status_code, flow_resp.text,
+                            )
+                        else:
+                            logger.info(
+                                "Admin WhatsApp flow notification sent to %s", settings.admin_whatsapp_number
+                            )
+                    except Exception:
+                        logger.exception("Failed to send admin WhatsApp flow notification for sender=%s", sender)
 
         # ── Update conversation in database ───────────────────────────────
         update_payload = {

@@ -86,6 +86,13 @@ def set_meeting_state(conversation_data: list[dict[str, Any]], state: dict[str, 
         conversation_data[-1]["meeting_state"] = state
 
 
+def fresh_meeting_state() -> dict[str, Any]:
+    """A clean slate, used to reset the booking suggestion at the start of a new
+    day-session (see `is_first_message_of_session` in bot_chat.py — same one
+    calendar UTC day definition, derived from whatsapp_conversations)."""
+    return _empty_state()
+
+
 def is_declined_today(state: dict[str, Any]) -> bool:
     declined_date = state.get("declined_date")
     if not declined_date:

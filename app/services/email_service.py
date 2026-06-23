@@ -293,18 +293,45 @@ def _build_flow_completion_html(sender: str, questions: list[dict]) -> str:
             </tr>{_email_footer("This is an automated notification from your WhatsApp bot.")}{_email_close()}"""
 
 
-def send_flow_completion_email(sender: str, questions: list[dict]) -> None:
-    """Notify the admin that a user completed the flow, with their answers."""
+def build_flow_completion_body(sender: str, questions: list[dict]) -> str:
+    """Build the plain-text flow-completion summary. Used for the admin
+    WhatsApp notification (Flow Creation's WhatsApp notification toggle)."""
+    lines = [
+        "A user completed the flow.",
+        "",
+        f"Sender: {sender}",
+        "",
+        "Responses",
+        "───────────────────────────────",
+    ]
+    for q in questions:
+        lines.append(f"Q: {q.get('question') or 'Question'}")
+        lines.append(f"A: {q.get('answer') or '—'}")
+        lines.append("")
+    lines += [
+        "───────────────────────────────",
+        "This is an automated notification from your WhatsApp bot.",
+    ]
+    return "\n".join(lines)
+
+
+def send_flow_completion_email(sender: str, questions: list[dict], email_enabled: bool = False) -> None:
+    """Notify the admin (ADMIN_NOTIFICATION_EMAIL) that a user completed the
+    flow, gated by the Flow Creation section's Email notification toggle."""
     if not settings.resend_api_key:
         logger.warning("RESEND_API_KEY not configured; skipping flow completion email")
         return
 
-    if not settings.admin_email:
-        logger.warning("ADMIN_EMAIL not configured; skipping flow completion email")
+    if not email_enabled:
+        logger.info("Email notification toggle is off; skipping flow completion email")
+        return
+
+    if not settings.admin_notification_email:
+        logger.warning("ADMIN_NOTIFICATION_EMAIL not configured; skipping flow completion email")
         return
 
     body = _build_flow_completion_html(sender, questions)
-    if _send_email(settings.admin_email, "Flow Completed - New Responses", body):
-        logger.info("Flow completion email sent successfully to %s", settings.admin_email)
+    if _send_email(settings.admin_notification_email, "Flow Completed - New Responses", body):
+        logger.info("Flow completion email sent successfully to %s", settings.admin_notification_email)
     else:
-        logger.error("Flow completion email failed to send to %s", settings.admin_email)
+        logger.error("Flow completion email failed to send to %s", settings.admin_notification_email)

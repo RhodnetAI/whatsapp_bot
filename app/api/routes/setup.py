@@ -12,6 +12,7 @@ from app.models.schemas import (
     ConversationHistoryUpdate,
     EnhancedRetrievalUpdate,
     FlowConfigUpdate,
+    FlowNotificationUpdate,
     InstructionsUpdate,
     SchedulerNotificationUpdate,
     SectionToggleRequest,
@@ -116,6 +117,12 @@ async def get_settings(token: dict = Depends(verify_token)):
     scheduler_notify_email_enabled = (
         bool(row.get("scheduler_notify_email_enabled")) if table == "information_bot" else False
     )
+    flow_notify_whatsapp_enabled = (
+        bool(row.get("flow_notify_whatsapp_enabled")) if table == "information_bot" else False
+    )
+    flow_notify_email_enabled = (
+        bool(row.get("flow_notify_email_enabled")) if table == "information_bot" else False
+    )
 
     return SettingsResponse(
         active_bot=table,
@@ -134,6 +141,8 @@ async def get_settings(token: dict = Depends(verify_token)):
         conversation_history_enabled=conversation_history_enabled,
         scheduler_notify_whatsapp_enabled=scheduler_notify_whatsapp_enabled,
         scheduler_notify_email_enabled=scheduler_notify_email_enabled,
+        flow_notify_whatsapp_enabled=flow_notify_whatsapp_enabled,
+        flow_notify_email_enabled=flow_notify_email_enabled,
         setup_completed=True,
     )
 
@@ -324,6 +333,20 @@ async def update_scheduler_notifications(
         {
             "scheduler_notify_whatsapp_enabled": payload.whatsapp_enabled,
             "scheduler_notify_email_enabled": payload.email_enabled,
+        }
+    ).eq("id", SINGLETON_ID).execute()
+    return {"ok": True}
+
+
+@router.put("/flow/notifications")
+async def update_flow_notifications(
+    payload: FlowNotificationUpdate,
+    token: dict = Depends(verify_token),
+):
+    _db().table("information_bot").update(
+        {
+            "flow_notify_whatsapp_enabled": payload.whatsapp_enabled,
+            "flow_notify_email_enabled": payload.email_enabled,
         }
     ).eq("id", SINGLETON_ID).execute()
     return {"ok": True}

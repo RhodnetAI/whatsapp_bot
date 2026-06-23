@@ -270,6 +270,11 @@ class SchedulerNotificationUpdate(BaseModel):
     email_enabled: bool
 
 
+class FlowNotificationUpdate(BaseModel):
+    whatsapp_enabled: bool
+    email_enabled: bool
+
+
 # ── Sales Bot ────────────────────────────────────────────────────────────────
 
 
@@ -438,4 +443,6 @@ class SettingsResponse(BaseModel):
     conversation_history_enabled: bool = True
     scheduler_notify_whatsapp_enabled: bool = False
     scheduler_notify_email_enabled: bool = False
+    flow_notify_whatsapp_enabled: bool = False
+    flow_notify_email_enabled: bool = False
     setup_completed: bool = False
