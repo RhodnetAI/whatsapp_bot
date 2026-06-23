@@ -126,7 +126,7 @@ async def _vectorize_item(item_id: str, fields: dict[str, Any]) -> str:
 async def create_item(payload: ProductServiceCreate, background_tasks: BackgroundTasks) -> ProductServiceItem:
     fields = payload.model_dump(exclude={"kind"})
     item = await _create_row(payload.kind, fields, source="manual")
-    background_tasks.add_task(_vectorize_item, item.id, fields)
+    background_tasks.add_task(_vectorize_item, item.id, {**fields, "kind": payload.kind})
     return item
 
 
@@ -141,7 +141,7 @@ async def update_item(
     now = datetime.now(timezone.utc).isoformat()
     update_payload = {**fields, "vectorization_status": "processing", "updated_at": now}
     _db().table(TABLE_NAME).update(update_payload).eq("id", item_id).execute()
-    background_tasks.add_task(_vectorize_item, item_id, fields)
+    background_tasks.add_task(_vectorize_item, item_id, {**fields, "kind": existing.get("kind")})
 
     return _row_to_item({**existing, **update_payload})
 
@@ -164,12 +164,13 @@ async def reindex_all(background_tasks: BackgroundTasks) -> int:
     vectorization_status='done' (the old hardcoded value) but were never
     actually embedded, so search_products() would find nothing for them
     until they're individually edited or this is run."""
-    result = _db().table(TABLE_NAME).select("id, " + ", ".join(FIELD_NAMES)).execute()
+    result = _db().table(TABLE_NAME).select("id, kind, " + ", ".join(FIELD_NAMES)).execute()
     rows = [row for row in (result.data or []) if isinstance(row, dict)]
 
     for row in rows:
         item_id = str(row.get("id"))
         fields = {name: row.get(name) or "" for name in FIELD_NAMES}
+        fields["kind"] = row.get("kind") or "product"
         _db().table(TABLE_NAME).update({"vectorization_status": "processing"}).eq("id", item_id).execute()
         background_tasks.add_task(_vectorize_item, item_id, fields)
 
@@ -251,7 +252,7 @@ async def _process_upload_job(job_id: str, kind: str, rows: list[dict[str, str]]
     try:
         for fields in rows:
             item = await _create_row(kind, fields, source="excel")
-            item.vectorization_status = await _vectorize_item(item.id, fields)
+            item.vectorization_status = await _vectorize_item(item.id, {**fields, "kind": kind})
             job["items"].append(item)
             job["processed"] += 1
         job["status"] = "done"

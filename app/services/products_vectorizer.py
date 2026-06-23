@@ -43,12 +43,20 @@ PRODUCT_SEARCH_SCORE_THRESHOLD = float(os.getenv("PRODUCT_SEARCH_SCORE_THRESHOLD
 
 # Fields that carry an item's *meaning* for retrieval. Structured fields
 # (price/status/counts) are kept in the payload for prompt formatting but
-# don't meaningfully change what a semantic search should match on.
+# don't meaningfully change what a semantic search should match on. "kind"
+# is handled separately (see _build_embedding_text) since it's a tag, not
+# free text.
 _EMBED_FIELDS = ("name", "category", "short_description", "full_description")
+
+_KIND_LABELS = {"product": "Product", "service": "Service"}
 
 # Payload fields mirror information_bot_products_services columns 1:1 so the
 # search result can be formatted by bot_chat.py the same way a DB row is.
+# "kind" tags each point as a product or a service, so a generic query like
+# "give me your services" can match on the tag itself rather than needing to
+# resemble a specific item's description.
 _PAYLOAD_FIELDS = (
+    "kind",
     "name",
     "short_description",
     "full_description",
@@ -66,7 +74,9 @@ _qdrant_client_instance: Any = None
 
 
 def _build_embedding_text(fields: dict[str, Any]) -> str:
-    parts = [str(fields.get(name) or "").strip() for name in _EMBED_FIELDS]
+    kind_label = _KIND_LABELS.get(str(fields.get("kind") or "").strip().lower())
+    parts = [f"Type: {kind_label}"] if kind_label else []
+    parts.extend(str(fields.get(name) or "").strip() for name in _EMBED_FIELDS)
     return "\n".join(part for part in parts if part)
 
 

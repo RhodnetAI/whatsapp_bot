@@ -29,7 +29,11 @@ _PROMPT_CONFIG_KEYS = (
 
 # Order/labels mirror the "Available fields" list in the products_services_prompt
 # stored in app_config (sql/015_add_company_info_products_prompt_config_entries.sql).
+# "kind" leads the list — it's the product/service tag stored on each Qdrant
+# point (see products_vectorizer.py), shown first so the model can tell at a
+# glance which retrieved items are products vs. services.
 _PRODUCT_SERVICE_FIELDS = (
+    ("kind", "Type"),
     ("name", "Name"),
     ("short_description", "Short Description"),
     ("category", "Category"),
@@ -249,11 +253,14 @@ async def _fetch_products_services_rows(query: str) -> list[dict[str, Any]]:
 
 
 def _format_product_service_item(row: dict[str, Any]) -> str:
-    lines = [
-        f"{label}: {row[field]}"
-        for field, label in _PRODUCT_SERVICE_FIELDS
-        if row.get(field) not in (None, "")
-    ]
+    lines = []
+    for field, label in _PRODUCT_SERVICE_FIELDS:
+        value = row.get(field)
+        if value in (None, ""):
+            continue
+        if field == "kind":
+            value = str(value).strip().title()
+        lines.append(f"{label}: {value}")
     return "\n".join(lines)
 
 
