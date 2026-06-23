@@ -58,12 +58,70 @@ def build_booking_body(
     return "\n".join(lines)
 
 
-def _detail_row(label: str, value: str) -> str:
+# ── Shared email chrome (brand tokens mirrored from frontend/src/index.css) ───
+# Primary purple scale: #5b38f0 (primary-1), #4a2dc4 (primary-2, used as the
+# header badge tint). Neutrals: #f2f0f8 (base-2, page bg), #ffffff (card),
+# #eceaf3 (base-3, dividers), #f0edfe (secondary-1, callout bg),
+# #2b2b2b (contrast-2, body text), #6b6b6b (mid-4, secondary text),
+# #959595 (mid-2, footer text).
+_FONT = "-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif"
+_PRIMARY = "#5b38f0"
+_PRIMARY_DARK = "#4a2dc4"
+
+
+def _email_open() -> str:
+    return f"""<!DOCTYPE html>
+<html>
+  <body style="margin:0;padding:0;background-color:#f2f0f8;font-family:{_FONT};">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f2f0f8;padding:40px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background-color:#ffffff;border:1px solid #eceaf3;border-radius:16px;overflow:hidden;">"""
+
+
+def _email_header(badge_glyph: str, kicker: str, title: str) -> str:
     return f"""
-              <tr>
-                <td style="padding:10px 16px;color:#6b6b6b;font-size:13px;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;white-space:nowrap;">{html.escape(label)}</td>
-                <td style="padding:10px 16px;color:#2b2b2b;font-size:13px;font-weight:600;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">{html.escape(value)}</td>
-              </tr>"""
+            <tr>
+              <td style="background-color:{_PRIMARY};padding:36px 32px 30px;text-align:center;">
+                <table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:0 auto;">
+                  <tr>
+                    <td width="52" height="52" align="center" valign="middle" style="width:52px;height:52px;border-radius:50%;background-color:{_PRIMARY_DARK};font-size:24px;line-height:52px;color:#ffffff;font-family:{_FONT};">{badge_glyph}</td>
+                  </tr>
+                </table>
+                <p style="margin:16px 0 4px;color:rgba(255,255,255,0.7);font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;font-family:{_FONT};">{kicker}</p>
+                <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:700;font-family:{_FONT};">{title}</h1>
+              </td>
+            </tr>"""
+
+
+def _email_footer(note: str = "This is an automated message — no reply needed.") -> str:
+    return f"""
+            <tr>
+              <td style="padding:22px 32px 28px;text-align:center;border-top:1px solid #eceaf3;">
+                <p style="margin:0;color:#959595;font-size:12px;font-family:{_FONT};">{note}</p>
+              </td>
+            </tr>"""
+
+
+def _email_close() -> str:
+    return """
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>"""
+
+
+def _detail_row(label: str, value: str, is_last: bool = False) -> str:
+    border = "" if is_last else "border-bottom:1px solid #eceaf3;"
+    return f"""
+                  <tr>
+                    <td style="padding:13px 18px;{border}">
+                      <p style="margin:0 0 2px;color:#6b6b6b;font-size:11px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;font-family:{_FONT};">{html.escape(label)}</p>
+                      <p style="margin:0;color:#2b2b2b;font-size:14px;font-weight:600;font-family:{_FONT};">{html.escape(value)}</p>
+                    </td>
+                  </tr>"""
 
 
 def _build_email_html(
@@ -76,66 +134,63 @@ def _build_email_html(
     calendar_event_link: str = "",
     recipient_is_admin: bool = False,
 ) -> str:
-    """Build an HTML confirmation email styled to match the website theme."""
+    """Build an HTML confirmation email styled to match the website's brand
+    (primary purple #5b38f0, rounded cards, lavender accents — see
+    frontend/src/index.css for the source design tokens)."""
     date_label = meeting_datetime.strftime("%A, %B %d, %Y")
     time_label = meeting_datetime.strftime("%I:%M %p")
 
     if recipient_is_admin:
+        badge_glyph, kicker, title = "&#128197;", "New Booking", "Meeting Booked"
         intro = f"A new meeting has been booked by <strong>{html.escape(user_name)}</strong>."
     else:
-        intro = f"Hi {html.escape(user_name)}, your meeting has been confirmed! Here are the details:"
+        badge_glyph, kicker, title = "&#10003;", "Booking Confirmed", "You're All Set!"
+        intro = f"Hi {html.escape(user_name)}, your meeting has been confirmed. Here are the details:"
 
     rows = [
         _detail_row("Name", user_name),
         _detail_row("Email", user_email),
         _detail_row("Date", date_label),
         _detail_row("Time", time_label),
-        _detail_row("Duration", f"{duration_minutes} minutes"),
+        _detail_row("Duration", f"{duration_minutes} minutes", is_last=True),
     ]
 
-    calendar_section = ""
+    calendar_button = ""
     if recipient_is_admin and calendar_event_link:
-        calendar_section = f"""
-              <div style="text-align:center;margin:16px 0 0;">
-                <a href="{html.escape(calendar_event_link)}" style="color:#5b38f0;text-decoration:none;font-weight:600;font-size:13px;">View in Google Calendar &rarr;</a>
-              </div>"""
+        calendar_button = f"""
+                <table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:12px auto 0;">
+                  <tr>
+                    <td style="border-radius:10px;border:1.5px solid {_PRIMARY};">
+                      <a href="{html.escape(calendar_event_link)}" style="display:inline-block;padding:11px 28px;color:{_PRIMARY};text-decoration:none;font-weight:600;font-size:13.5px;font-family:{_FONT};">View in Google Calendar</a>
+                    </td>
+                  </tr>
+                </table>"""
 
     purpose_text = html.escape(purpose) if purpose else "Not specified."
 
-    return f"""<!DOCTYPE html>
-<html>
-  <body style="margin:0;padding:0;background-color:#f2f0f8;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f2f0f8;padding:32px 16px;">
-      <tr>
-        <td align="center">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background-color:#ffffff;border:1px solid #d6d4df;border-radius:12px;overflow:hidden;">
-            <tr>
-              <td style="background-color:#5b38f0;padding:28px 32px;">
-                <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">Meeting Confirmed</h1>
-              </td>
-            </tr>
+    return f"""{_email_open()}{_email_header(badge_glyph, kicker, title)}
             <tr>
               <td style="padding:32px;">
-                <p style="margin:0 0 20px;color:#2b2b2b;font-size:15px;line-height:1.6;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">{intro}</p>
-                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0edfe;border-radius:8px;">{"".join(rows)}
+                <p style="margin:0 0 22px;color:#2b2b2b;font-size:15px;line-height:1.6;font-family:{_FONT};">{intro}</p>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#faf9fe;border:1px solid #eceaf3;border-radius:12px;">{"".join(rows)}
                 </table>
-                <div style="text-align:center;margin:28px 0 0;">
-                  <a href="{html.escape(meet_link)}" style="display:inline-block;background-color:#5b38f0;color:#ffffff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 28px;border-radius:8px;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">Join Google Meet</a>
-                </div>{calendar_section}
-                <p style="margin:28px 0 0;color:#2b2b2b;font-size:14px;line-height:1.6;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;"><strong>Purpose</strong><br/>{purpose_text}</p>
+                <table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:28px auto 0;">
+                  <tr>
+                    <td style="border-radius:10px;background-color:{_PRIMARY};">
+                      <a href="{html.escape(meet_link)}" style="display:inline-block;padding:14px 36px;color:#ffffff;text-decoration:none;font-weight:600;font-size:14.5px;font-family:{_FONT};">Join Google Meet &rarr;</a>
+                    </td>
+                  </tr>
+                </table>{calendar_button}
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:28px;background-color:#f0edfe;border-radius:0 10px 10px 0;border-left:3px solid {_PRIMARY};">
+                  <tr>
+                    <td style="padding:14px 18px;">
+                      <p style="margin:0 0 4px;color:#4a2dc4;font-size:11px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;font-family:{_FONT};">Purpose</p>
+                      <p style="margin:0;color:#2b2b2b;font-size:14px;line-height:1.5;font-family:{_FONT};">{purpose_text}</p>
+                    </td>
+                  </tr>
+                </table>
               </td>
-            </tr>
-            <tr>
-              <td style="background-color:#f2f0f8;padding:16px 32px;text-align:center;">
-                <p style="margin:0;color:#808080;font-size:12px;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">This is an automated confirmation from your WhatsApp bot.</p>
-              </td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    </table>
-  </body>
-</html>"""
+            </tr>{_email_footer()}{_email_close()}"""
 
 
 def _send_email(to_address: str, subject: str, html_body: str) -> bool:
@@ -162,8 +217,11 @@ def send_meeting_confirmation(
     meet_link: str,
     purpose: str,
     calendar_event_link: str = "",
+    notify_admin: bool = False,
 ) -> None:
-    """Send a confirmation email to the user and a separate notification email to the admin."""
+    """Send a confirmation email to the user, and — when the Scheduler's Email
+    notification toggle is on — a separate notification email to the admin
+    address configured via ADMIN_NOTIFICATION_EMAIL."""
     if not settings.resend_api_key:
         logger.warning("RESEND_API_KEY not configured; skipping confirmation email")
         return
@@ -185,7 +243,7 @@ def send_meeting_confirmation(
     else:
         logger.error("Confirmation email failed to send to %s", user_email)
 
-    if settings.admin_email:
+    if notify_admin and settings.admin_notification_email:
         admin_body = _build_email_html(
             user_name=user_name,
             user_email=user_email,
@@ -196,51 +254,36 @@ def send_meeting_confirmation(
             calendar_event_link=calendar_event_link,
             recipient_is_admin=True,
         )
-        if _send_email(settings.admin_email, f"New Meeting Booked – {when}", admin_body):
-            logger.info("Admin notification email sent successfully to %s", settings.admin_email)
+        if _send_email(settings.admin_notification_email, f"New Meeting Booked – {when}", admin_body):
+            logger.info(
+                "Admin notification email sent successfully to %s", settings.admin_notification_email
+            )
         else:
-            logger.error("Admin notification email failed to send to %s", settings.admin_email)
-    else:
-        logger.warning("ADMIN_EMAIL not configured; skipping admin notification email")
+            logger.error(
+                "Admin notification email failed to send to %s", settings.admin_notification_email
+            )
 
 
 def _build_flow_completion_html(sender: str, questions: list[dict]) -> str:
     """Build an HTML summary of a completed flow's responses for the admin."""
+    row_count = len(questions)
     rows = "".join(
-        _detail_row(str(q.get("question") or "Question"), str(q.get("answer") or "—"))
-        for q in questions
+        _detail_row(
+            str(q.get("question") or "Question"),
+            str(q.get("answer") or "—"),
+            is_last=(i == row_count - 1),
+        )
+        for i, q in enumerate(questions)
     )
 
-    return f"""<!DOCTYPE html>
-<html>
-  <body style="margin:0;padding:0;background-color:#f2f0f8;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f2f0f8;padding:32px 16px;">
-      <tr>
-        <td align="center">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background-color:#ffffff;border:1px solid #d6d4df;border-radius:12px;overflow:hidden;">
-            <tr>
-              <td style="background-color:#5b38f0;padding:28px 32px;">
-                <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">Flow Completed</h1>
-              </td>
-            </tr>
+    return f"""{_email_open()}{_email_header("&#9998;", "Flow Completed", "New Responses")}
             <tr>
               <td style="padding:32px;">
-                <p style="margin:0 0 20px;color:#2b2b2b;font-size:15px;line-height:1.6;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">A user (<strong>{html.escape(sender)}</strong>) just completed the flow. Here are their responses:</p>
-                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0edfe;border-radius:8px;">{rows}
+                <p style="margin:0 0 22px;color:#2b2b2b;font-size:15px;line-height:1.6;font-family:{_FONT};">A user (<strong>{html.escape(sender)}</strong>) just completed the flow. Here are their responses:</p>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#faf9fe;border:1px solid #eceaf3;border-radius:12px;">{rows}
                 </table>
               </td>
-            </tr>
-            <tr>
-              <td style="background-color:#f2f0f8;padding:16px 32px;text-align:center;">
-                <p style="margin:0;color:#808080;font-size:12px;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">This is an automated notification from your WhatsApp bot.</p>
-              </td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    </table>
-  </body>
-</html>"""
+            </tr>{_email_footer("This is an automated notification from your WhatsApp bot.")}{_email_close()}"""
 
 
 def send_flow_completion_email(sender: str, questions: list[dict]) -> None:

@@ -265,6 +265,11 @@ class ConversationHistoryUpdate(BaseModel):
     enabled: bool
 
 
+class SchedulerNotificationUpdate(BaseModel):
+    whatsapp_enabled: bool
+    email_enabled: bool
+
+
 # ── Sales Bot ────────────────────────────────────────────────────────────────
 
 
@@ -431,4 +436,6 @@ class SettingsResponse(BaseModel):
     section_states: dict = {}
     enhanced_retrieval_enabled: bool = False
     conversation_history_enabled: bool = True
+    scheduler_notify_whatsapp_enabled: bool = False
+    scheduler_notify_email_enabled: bool = False
     setup_completed: bool = False

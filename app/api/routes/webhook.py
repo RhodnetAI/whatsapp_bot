@@ -182,18 +182,22 @@ async def _generate_response_and_update(
         if not flow_enabled:
             logger.info("Using bot conversation AI for sender=%s", sender)
 
-            # Load scheduler_enabled once
+            # Load scheduler_enabled + admin notification toggles once
             scheduler_enabled = False
+            notify_admin_whatsapp = False
+            notify_admin_email = False
             try:
                 info_res = (
                     db_client.table("information_bot")
-                    .select("scheduler_enabled")
+                    .select("scheduler_enabled, scheduler_notify_whatsapp_enabled, scheduler_notify_email_enabled")
                     .eq("id", 1)
                     .limit(1)
                     .execute()
                 )
                 info_row = first_row(info_res) or {}
                 scheduler_enabled = bool(info_row.get("scheduler_enabled"))
+                notify_admin_whatsapp = bool(info_row.get("scheduler_notify_whatsapp_enabled"))
+                notify_admin_email = bool(info_row.get("scheduler_notify_email_enabled"))
             except Exception:
                 logger.exception("Failed to load scheduler_enabled for sender=%s", sender)
 
@@ -278,6 +282,7 @@ async def _generate_response_and_update(
                             meet_link=meet_link,
                             purpose=purpose,
                             calendar_event_link=calendar_event_link,
+                            notify_admin=notify_admin_email,
                         )
                         logger.info("Confirmation email completed for sender=%s", sender)
 
@@ -292,6 +297,37 @@ async def _generate_response_and_update(
                             calendar_event_link=calendar_event_link,
                         )
                         messages_to_send.append(whatsapp_summary)
+
+                        # ── Admin notifications (Scheduler toggles) ─────────
+                        if notify_admin_whatsapp and settings.admin_whatsapp_number:
+                            try:
+                                admin_whatsapp_summary = build_booking_body(
+                                    user_name=booking_data["user_name"],
+                                    user_email=booking_data["user_email"],
+                                    meeting_datetime=meeting_dt,
+                                    duration_minutes=duration,
+                                    meet_link=meet_link,
+                                    purpose=purpose,
+                                    calendar_event_link=calendar_event_link,
+                                    recipient_is_admin=True,
+                                )
+                                resp = send_whatsapp_text(
+                                    settings.admin_whatsapp_number, admin_whatsapp_summary
+                                )
+                                if resp.status_code >= 400:
+                                    logger.error(
+                                        "Admin WhatsApp notification failed %s: %s",
+                                        resp.status_code, resp.text,
+                                    )
+                                else:
+                                    logger.info(
+                                        "Admin WhatsApp notification sent to %s",
+                                        settings.admin_whatsapp_number,
+                                    )
+                            except Exception:
+                                logger.exception(
+                                    "Failed to send admin WhatsApp notification for sender=%s", sender
+                                )
 
                         logger.info(
                             "Booking completed for sender=%s meet_link=%s", sender, meet_link

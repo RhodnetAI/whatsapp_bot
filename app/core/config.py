@@ -74,6 +74,8 @@ class Settings:
     admin_username: str
     admin_password: str
     admin_email: str
+    admin_whatsapp_number: str
+    admin_notification_email: str
     resend_api_key: str
     resend_from_email: str
     google_meet_link: str
@@ -119,6 +121,8 @@ settings = Settings(
     admin_username=_required_env("ADMIN_USERNAME"),
     admin_password=_required_env("ADMIN_PASSWORD"),
     admin_email=os.getenv("ADMIN_EMAIL", ""),
+    admin_whatsapp_number=os.getenv("ADMIN_WHATSAPP_NUMBER", ""),
+    admin_notification_email=os.getenv("ADMIN_NOTIFICATION_EMAIL", ""),
     resend_api_key=os.getenv("RESEND_API_KEY", ""),
     resend_from_email=os.getenv("RESEND_FROM_EMAIL", "onboarding@resend.dev"),
     google_meet_link=os.getenv("GOOGLE_MEET_LINK", "https://meet.google.com/yry-mdbu-pju"),
