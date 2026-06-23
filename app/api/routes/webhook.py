@@ -222,7 +222,12 @@ async def _generate_response_and_update(
                     # send emails, and prepare the confirmation messages below.
                     if isinstance(message_id, str) and message_id:
                         try:
-                            send_whatsapp_typing_indicator(message_id)
+                            typing_resp = send_whatsapp_typing_indicator(message_id)
+                            if typing_resp.status_code >= 400:
+                                logger.error(
+                                    "Typing indicator rejected during booking completion sender=%s status=%s body=%s",
+                                    sender, typing_resp.status_code, typing_resp.text,
+                                )
                         except Exception:
                             logger.exception("Failed to send typing indicator for sender=%s", sender)
 
@@ -282,7 +287,7 @@ async def _generate_response_and_update(
                             meet_link=meet_link,
                             purpose=purpose,
                             calendar_event_link=calendar_event_link,
-                            notify_admin=notify_admin_email,
+                            email_enabled=notify_admin_email,
                         )
                         logger.info("Confirmation email completed for sender=%s", sender)
 
@@ -679,8 +684,14 @@ async def process_message(data: Any) -> None:
             message_type,
         )
         try:
-            send_whatsapp_typing_indicator(message_id)
-            logger.info("Typing indicator sent successfully")
+            typing_resp = send_whatsapp_typing_indicator(message_id)
+            if typing_resp.status_code >= 400:
+                logger.error(
+                    "Typing indicator rejected for sender=%s status=%s body=%s",
+                    sender, typing_resp.status_code, typing_resp.text,
+                )
+            else:
+                logger.info("Typing indicator sent successfully")
         except Exception:
             logger.exception("Error sending typing indicator for sender=%s", sender)
     else:

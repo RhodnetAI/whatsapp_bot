@@ -217,13 +217,18 @@ def send_meeting_confirmation(
     meet_link: str,
     purpose: str,
     calendar_event_link: str = "",
-    notify_admin: bool = False,
+    email_enabled: bool = False,
 ) -> None:
-    """Send a confirmation email to the user, and — when the Scheduler's Email
-    notification toggle is on — a separate notification email to the admin
-    address configured via ADMIN_NOTIFICATION_EMAIL."""
+    """Send booking confirmation emails, gated entirely by the Scheduler's Email
+    notification toggle: when off, neither the user nor the admin receives an
+    email; when on, the user always gets a confirmation and the admin
+    (ADMIN_NOTIFICATION_EMAIL) gets a separate notification copy."""
     if not settings.resend_api_key:
         logger.warning("RESEND_API_KEY not configured; skipping confirmation email")
+        return
+
+    if not email_enabled:
+        logger.info("Email notification toggle is off; skipping booking confirmation emails")
         return
 
     when = meeting_datetime.strftime("%b %d, %Y %I:%M %p UTC")
@@ -243,7 +248,7 @@ def send_meeting_confirmation(
     else:
         logger.error("Confirmation email failed to send to %s", user_email)
 
-    if notify_admin and settings.admin_notification_email:
+    if settings.admin_notification_email:
         admin_body = _build_email_html(
             user_name=user_name,
             user_email=user_email,
@@ -262,6 +267,8 @@ def send_meeting_confirmation(
             logger.error(
                 "Admin notification email failed to send to %s", settings.admin_notification_email
             )
+    else:
+        logger.warning("ADMIN_NOTIFICATION_EMAIL not configured; skipping admin notification email")
 
 
 def _build_flow_completion_html(sender: str, questions: list[dict]) -> str:
