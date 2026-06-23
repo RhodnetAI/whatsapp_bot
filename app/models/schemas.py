@@ -431,6 +431,10 @@ class SalesOrdersListResponse(BaseModel):
     orders: list[SalesOrderOut] = []
 
 
+class SalesOrderStatusUpdate(BaseModel):
+    status: str
+
+
 class SettingsResponse(BaseModel):
     active_bot: str = "information_bot"
     bot_name: str | None = None

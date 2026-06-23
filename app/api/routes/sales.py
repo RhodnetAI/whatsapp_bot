@@ -15,6 +15,7 @@ from app.models.schemas import (
     SalesOrderItemOut,
     SalesOrderOut,
     SalesOrdersListResponse,
+    SalesOrderStatusUpdate,
     SalesPaymentSettingsResponse,
     SalesPaymentSettingsUpdate,
     SalesProductCreate,
@@ -143,40 +144,55 @@ async def update_payment_settings(payload: SalesPaymentSettingsUpdate, token: di
     return await get_payment_settings(token)
 
 
-# ── Orders (read-only admin view) ────────────────────────────────────────────
+# ── Orders ───────────────────────────────────────────────────────────────────
+def _to_order_out(order: dict) -> SalesOrderOut:
+    items = [
+        SalesOrderItemOut(
+            name=i.get("name") or "",
+            retailer_id=i.get("retailer_id") or "",
+            quantity=int(i.get("quantity") or 0),
+            unit_price_minor=int(i.get("unit_price_minor") or 0),
+            line_total_minor=int(i.get("line_total_minor") or 0),
+        )
+        for i in orders.get_order_items(order["id"])
+    ]
+    address = order.get("shipping_address")
+    return SalesOrderOut(
+        id=str(order.get("id")),
+        order_number=order.get("order_number") or "",
+        sender=order.get("sender") or "",
+        status=order.get("status") or "",
+        subtotal_minor=int(order.get("subtotal_minor") or 0),
+        shipping_minor=int(order.get("shipping_minor") or 0),
+        total_minor=int(order.get("total_minor") or 0),
+        currency=order.get("currency") or "INR",
+        customer_name=order.get("customer_name") or "",
+        customer_phone=order.get("customer_phone") or "",
+        shipping_address=address if isinstance(address, dict) else {},
+        payment_status=order.get("payment_status") or "created",
+        razorpay_payment_link_url=order.get("razorpay_payment_link_url"),
+        created_at=order.get("created_at"),
+        items=items,
+    )
+
+
 @router.get("/orders", response_model=SalesOrdersListResponse)
 async def list_orders(include_drafts: bool = False, token: dict = Depends(verify_token)):
     rows = orders.list_orders(include_drafts=include_drafts)
-    result: list[SalesOrderOut] = []
-    for order in rows:
-        items = [
-            SalesOrderItemOut(
-                name=i.get("name") or "",
-                retailer_id=i.get("retailer_id") or "",
-                quantity=int(i.get("quantity") or 0),
-                unit_price_minor=int(i.get("unit_price_minor") or 0),
-                line_total_minor=int(i.get("line_total_minor") or 0),
-            )
-            for i in orders.get_order_items(order["id"])
-        ]
-        address = order.get("shipping_address")
-        result.append(
-            SalesOrderOut(
-                id=str(order.get("id")),
-                order_number=order.get("order_number") or "",
-                sender=order.get("sender") or "",
-                status=order.get("status") or "",
-                subtotal_minor=int(order.get("subtotal_minor") or 0),
-                shipping_minor=int(order.get("shipping_minor") or 0),
-                total_minor=int(order.get("total_minor") or 0),
-                currency=order.get("currency") or "INR",
-                customer_name=order.get("customer_name") or "",
-                customer_phone=order.get("customer_phone") or "",
-                shipping_address=address if isinstance(address, dict) else {},
-                payment_status=order.get("payment_status") or "created",
-                razorpay_payment_link_url=order.get("razorpay_payment_link_url"),
-                created_at=order.get("created_at"),
-                items=items,
-            )
-        )
-    return SalesOrdersListResponse(orders=result)
+    return SalesOrdersListResponse(orders=[_to_order_out(order) for order in rows])
+
+
+@router.put("/orders/{order_id}/status", response_model=SalesOrderOut)
+async def update_order_status(
+    order_id: str, payload: SalesOrderStatusUpdate, token: dict = Depends(verify_token)
+):
+    """Advance an order's fulfillment status one step at a time (paid →
+    initiated → processed → shipped → out_for_delivery → delivered), or
+    cancel it at any point — see ``orders.next_status_options``."""
+    try:
+        updated = orders.update_order_status(order_id, payload.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not updated:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return _to_order_out(updated)

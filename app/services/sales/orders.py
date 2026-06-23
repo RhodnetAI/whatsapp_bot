@@ -294,6 +294,38 @@ def mark_order_failed(order_id: str) -> None:
     _db().table(ORDERS).update({"payment_status": "failed"}).eq("id", order_id).execute()
 
 
+# ── Fulfillment status (admin-driven, post-payment) ──────────────────────────
+# Once an order is paid, the admin dashboard advances it one step at a time
+# through this sequence, or cancels it at any point along the way. "delivered"
+# and "cancelled" are terminal — neither allows any further transition.
+FULFILLMENT_SEQUENCE = ["paid", "initiated", "processed", "shipped", "out_for_delivery", "delivered"]
+
+
+def next_status_options(current_status: str) -> list[str]:
+    """The statuses `current_status` may move to next: the immediate next step
+    in the fulfillment sequence plus "cancelled", or [] if `current_status`
+    isn't in the sequence (pre-payment/legacy/terminal states)."""
+    if current_status not in FULFILLMENT_SEQUENCE or current_status == "delivered":
+        return []
+    idx = FULFILLMENT_SEQUENCE.index(current_status)
+    return [FULFILLMENT_SEQUENCE[idx + 1], "cancelled"]
+
+
+def update_order_status(order_id: str, new_status: str) -> dict[str, Any] | None:
+    """Move an order to `new_status`, one step at a time per
+    `next_status_options`. Returns the updated order, or None if the order
+    doesn't exist. Raises ValueError if the transition isn't allowed."""
+    order = get_order(order_id)
+    if not order:
+        return None
+    current = order.get("status") or ""
+    allowed = next_status_options(current)
+    if new_status not in allowed:
+        raise ValueError(f"Cannot move order from '{current}' to '{new_status}'.")
+    _db().table(ORDERS).update({"status": new_status}).eq("id", order_id).execute()
+    return get_order(order_id)
+
+
 def list_orders(limit: int = 200, include_drafts: bool = False) -> list[dict[str, Any]]:
     """Admin order list. Drafts (unsubmitted carts) are hidden by default so the
     dashboard shows real orders; pass ``include_drafts=True`` to see them."""
