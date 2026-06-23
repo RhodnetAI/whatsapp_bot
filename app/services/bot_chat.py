@@ -27,8 +27,6 @@ _PROMPT_CONFIG_KEYS = (
     "knowledge_context_prompt",
 )
 
-_PRODUCTS_SERVICES_TABLE = "information_bot_products_services"
-
 # Order/labels mirror the "Available fields" list in the products_services_prompt
 # stored in app_config (sql/015_add_company_info_products_prompt_config_entries.sql).
 _PRODUCT_SERVICE_FIELDS = (
@@ -232,42 +230,22 @@ def _build_company_info_section(bot: dict[str, Any], prompt_config: dict[str, st
 
 
 PRODUCTS_SEARCH_TOP_K = 6
-PRODUCTS_FALLBACK_LIMIT = 8
-
-
-async def _fetch_products_services_fallback_rows(limit: int = PRODUCTS_FALLBACK_LIMIT) -> list[dict[str, Any]]:
-    """Bounded fallback used only when semantic search finds nothing — e.g.
-    embeddings aren't configured yet, or items haven't been (re)indexed since
-    this was wired in (see products_services.reindex_all). Capped the same
-    way the primary path is, so it can never balloon to the whole table."""
-    try:
-        result = (
-            _db()
-            .table(_PRODUCTS_SERVICES_TABLE)
-            .select(", ".join(field for field, _ in _PRODUCT_SERVICE_FIELDS))
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        return [row for row in (result.data or []) if isinstance(row, dict)]
-    except Exception:
-        logger.exception("Failed to fetch fallback products/services for prompt injection")
-        return []
 
 
 async def _fetch_products_services_rows(query: str) -> list[dict[str, Any]]:
     """Query-based retrieval for the Information Agent's Products & Services
-    section: semantic search over indexed product/service vectors, ranked by
-    relevance to the user's message and capped to PRODUCTS_SEARCH_TOP_K —
-    instead of injecting the entire catalog into every prompt."""
+    section: semantic search over indexed product/service vectors in Qdrant,
+    ranked by relevance to the user's message and capped to
+    PRODUCTS_SEARCH_TOP_K — instead of injecting the entire catalog into
+    every prompt. Deliberately has no DB fallback: if Qdrant has nothing
+    indexed yet (or is unreachable), this returns no products rather than
+    falling back to a raw table read — run products_services.reindex_all
+    once Qdrant is configured/reachable instead of masking the gap here."""
     try:
-        rows = await search_products(query, top_k=PRODUCTS_SEARCH_TOP_K)
+        return await search_products(query, top_k=PRODUCTS_SEARCH_TOP_K)
     except Exception:
         logger.exception("Product/service semantic search failed")
-        rows = []
-    if rows:
-        return rows
-    return await _fetch_products_services_fallback_rows()
+        return []
 
 
 def _format_product_service_item(row: dict[str, Any]) -> str:
