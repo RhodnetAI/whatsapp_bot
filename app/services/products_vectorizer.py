@@ -148,8 +148,13 @@ async def _get_qdrant_client() -> Any:
 async def _ensure_qdrant_collection(client: Any) -> None:
     if qmodels is None:
         return
-    exists = await client.collection_exists(collection_name=QDRANT_COLLECTION)
-    if not exists:
+    # Use get_collections() rather than collection_exists() — the latter hits
+    # GET /collections/{name}/exists, which some Qdrant deployments/proxies
+    # don't implement and answer with a bare 404 instead of a JSON error.
+    # get_collections() (GET /collections) is the long-stable listing endpoint.
+    collections = await client.get_collections()
+    existing_names = {c.name for c in collections.collections}
+    if QDRANT_COLLECTION not in existing_names:
         await client.create_collection(
             collection_name=QDRANT_COLLECTION,
             vectors_config={
