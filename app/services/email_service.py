@@ -315,6 +315,74 @@ def build_flow_completion_body(sender: str, questions: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _build_order_paid_html(order_number: str, customer_name: str, sender: str, item_lines: list[str], total_label: str) -> str:
+    """Build an HTML admin notification for a confirmed Sales Bot payment."""
+    item_rows = "".join(_detail_row(f"Item {i + 1}", line) for i, line in enumerate(item_lines))
+    rows = item_rows + _detail_row("Total paid", total_label, is_last=True)
+
+    return f"""{_email_open()}{_email_header("&#128176;", "Payment Received", "Order Confirmed")}
+            <tr>
+              <td style="padding:32px;">
+                <p style="margin:0 0 22px;color:#2b2b2b;font-size:15px;line-height:1.6;font-family:{_FONT};">A payment was just confirmed for order <strong>{html.escape(order_number)}</strong> from <strong>{html.escape(customer_name)}</strong> ({html.escape(sender)}).</p>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#faf9fe;border:1px solid #eceaf3;border-radius:12px;">{rows}
+                </table>
+              </td>
+            </tr>{_email_footer("This is an automated notification from your WhatsApp bot.")}{_email_close()}"""
+
+
+def build_order_paid_body(order_number: str, customer_name: str, sender: str, item_lines: list[str], total_label: str) -> str:
+    """Build the plain-text order-paid summary. Used for the admin WhatsApp
+    notification (Sales Bot payment notification toggle)."""
+    lines = [
+        "A payment has been received.",
+        "",
+        "Order Details",
+        "───────────────────────────────",
+        f"Order:     {order_number}",
+        f"Customer:  {customer_name}",
+        f"WhatsApp:  {sender}",
+        "",
+        "Items",
+        "───────────────────────────────",
+        *(item_lines or ["(no items)"]),
+        "",
+        f"Total paid: {total_label}",
+        "",
+        "───────────────────────────────",
+        "This is an automated notification from your WhatsApp bot.",
+    ]
+    return "\n".join(lines)
+
+
+def send_order_paid_email(
+    order_number: str,
+    customer_name: str,
+    sender: str,
+    item_lines: list[str],
+    total_label: str,
+    email_enabled: bool = False,
+) -> None:
+    """Notify the admin (ADMIN_NOTIFICATION_EMAIL) that a Sales Bot order was
+    paid, gated by the Sales Bot's payment Email notification toggle."""
+    if not settings.resend_api_key:
+        logger.warning("RESEND_API_KEY not configured; skipping order-paid email")
+        return
+
+    if not email_enabled:
+        logger.info("Email notification toggle is off; skipping order-paid email")
+        return
+
+    if not settings.admin_notification_email:
+        logger.warning("ADMIN_NOTIFICATION_EMAIL not configured; skipping order-paid email")
+        return
+
+    body = _build_order_paid_html(order_number, customer_name, sender, item_lines, total_label)
+    if _send_email(settings.admin_notification_email, f"Payment Received – Order {order_number}", body):
+        logger.info("Order-paid email sent successfully to %s", settings.admin_notification_email)
+    else:
+        logger.error("Order-paid email failed to send to %s", settings.admin_notification_email)
+
+
 def send_flow_completion_email(sender: str, questions: list[dict], email_enabled: bool = False) -> None:
     """Notify the admin (ADMIN_NOTIFICATION_EMAIL) that a user completed the
     flow, gated by the Flow Creation section's Email notification toggle."""

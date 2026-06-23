@@ -26,8 +26,8 @@ from typing import Any
 
 from app.core.config import settings
 from app.db.supabase_client import first_row, supabase, supabase_admin
-from app.services.whatsapp import send_whatsapp_message, send_whatsapp_typing_indicator
-from app.services import prompt_config
+from app.services.whatsapp import send_whatsapp_message, send_whatsapp_text, send_whatsapp_typing_indicator
+from app.services import email_service, prompt_config
 from app.services.sales import ai_chat, messaging as m
 from app.services.sales import cart, catalog, conversational, orders, razorpay_service
 
@@ -151,6 +151,8 @@ async def load_sales_config() -> dict[str, Any]:
         "catalog_id": settings.meta_catalog_id or "",
         "flow_id": settings.whatsapp_checkout_flow_id or "",
         "store_flow_id": settings.whatsapp_store_flow_id or "",
+        "payment_notify_whatsapp": bool(row.get("sales_payment_notify_whatsapp_enabled")),
+        "payment_notify_email": bool(row.get("sales_payment_notify_email_enabled")),
     }
 
 
@@ -1400,8 +1402,10 @@ async def handle_sales_message(sender: str, message: dict[str, Any], message_id:
 
 async def notify_order_paid(order: dict[str, Any]) -> None:
     """Send the post-payment confirmation message. Called by the Razorpay webhook
-    after the order has been marked paid (idempotently). Also closes the shopping
-    flow so the customer's next message shows the main menu again."""
+    after the order has been marked paid (idempotently). Also notifies the admin
+    via WhatsApp and/or Email (independently, per the Sales Bot's payment
+    notification toggles — both fire if both are enabled), and closes the
+    shopping flow so the customer's next message shows the main menu again."""
     cfg = await load_sales_config()
     order["items"] = orders.get_order_items(order["id"])
     currency = order.get("currency") or cfg["currency"]
@@ -1414,5 +1418,37 @@ async def notify_order_paid(order: dict[str, Any]) -> None:
         send_whatsapp_message(order["sender"], m.text("\n".join(lines)))
     except Exception:
         logger.exception("Failed to send paid confirmation for order=%s", order.get("order_number"))
+
+    # ── Admin notifications (Sales Bot payment toggles) ─────────────────────
+    item_lines = [f"{it['name']} ×{it['quantity']}" for it in order.get("items", [])]
+    total_label = m.format_money(order.get("total_minor") or 0, currency)
+    customer_name = order.get("customer_name") or "Customer"
+    sender = order.get("sender") or ""
+
+    if cfg["payment_notify_whatsapp"] and settings.admin_whatsapp_number:
+        try:
+            admin_body = email_service.build_order_paid_body(
+                order["order_number"], customer_name, sender, item_lines, total_label
+            )
+            resp = send_whatsapp_text(settings.admin_whatsapp_number, admin_body)
+            if resp.status_code >= 400:
+                logger.error(
+                    "Admin WhatsApp payment notification failed %s: %s", resp.status_code, resp.text,
+                )
+            else:
+                logger.info("Admin WhatsApp payment notification sent to %s", settings.admin_whatsapp_number)
+        except Exception:
+            logger.exception("Failed to send admin WhatsApp payment notification for order=%s", order.get("order_number"))
+
+    if cfg["payment_notify_email"]:
+        try:
+            await asyncio.to_thread(
+                email_service.send_order_paid_email,
+                order["order_number"], customer_name, sender, item_lines, total_label,
+                email_enabled=True,
+            )
+        except Exception:
+            logger.exception("Failed to send admin email payment notification for order=%s", order.get("order_number"))
+
     # Payment complete → close the flow for this sender.
     _reset_sales_state(order.get("sender") or "")

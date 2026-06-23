@@ -275,6 +275,11 @@ class FlowNotificationUpdate(BaseModel):
     email_enabled: bool
 
 
+class SalesPaymentNotificationUpdate(BaseModel):
+    whatsapp_enabled: bool
+    email_enabled: bool
+
+
 # ── Sales Bot ────────────────────────────────────────────────────────────────
 
 
@@ -445,4 +450,6 @@ class SettingsResponse(BaseModel):
     scheduler_notify_email_enabled: bool = False
     flow_notify_whatsapp_enabled: bool = False
     flow_notify_email_enabled: bool = False
+    sales_payment_notify_whatsapp_enabled: bool = False
+    sales_payment_notify_email_enabled: bool = False
     setup_completed: bool = False

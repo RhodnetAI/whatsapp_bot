@@ -14,6 +14,7 @@ from app.models.schemas import (
     FlowConfigUpdate,
     FlowNotificationUpdate,
     InstructionsUpdate,
+    SalesPaymentNotificationUpdate,
     SchedulerNotificationUpdate,
     SectionToggleRequest,
     SettingsResponse,
@@ -123,6 +124,12 @@ async def get_settings(token: dict = Depends(verify_token)):
     flow_notify_email_enabled = (
         bool(row.get("flow_notify_email_enabled")) if table == "information_bot" else False
     )
+    sales_payment_notify_whatsapp_enabled = (
+        bool(row.get("sales_payment_notify_whatsapp_enabled")) if table == "sales_bot" else False
+    )
+    sales_payment_notify_email_enabled = (
+        bool(row.get("sales_payment_notify_email_enabled")) if table == "sales_bot" else False
+    )
 
     return SettingsResponse(
         active_bot=table,
@@ -143,6 +150,8 @@ async def get_settings(token: dict = Depends(verify_token)):
         scheduler_notify_email_enabled=scheduler_notify_email_enabled,
         flow_notify_whatsapp_enabled=flow_notify_whatsapp_enabled,
         flow_notify_email_enabled=flow_notify_email_enabled,
+        sales_payment_notify_whatsapp_enabled=sales_payment_notify_whatsapp_enabled,
+        sales_payment_notify_email_enabled=sales_payment_notify_email_enabled,
         setup_completed=True,
     )
 
@@ -347,6 +356,20 @@ async def update_flow_notifications(
         {
             "flow_notify_whatsapp_enabled": payload.whatsapp_enabled,
             "flow_notify_email_enabled": payload.email_enabled,
+        }
+    ).eq("id", SINGLETON_ID).execute()
+    return {"ok": True}
+
+
+@router.put("/sales/payments/notifications")
+async def update_sales_payment_notifications(
+    payload: SalesPaymentNotificationUpdate,
+    token: dict = Depends(verify_token),
+):
+    _db().table("sales_bot").update(
+        {
+            "sales_payment_notify_whatsapp_enabled": payload.whatsapp_enabled,
+            "sales_payment_notify_email_enabled": payload.email_enabled,
         }
     ).eq("id", SINGLETON_ID).execute()
     return {"ok": True}

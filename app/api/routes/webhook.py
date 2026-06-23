@@ -99,6 +99,33 @@ def _send_messages(sender: str, messages: list[str]) -> None:
             logger.exception("Meta send failure for sender=%s", sender)
 
 
+# WhatsApp auto-dismisses a typing indicator ~25s after it's sent. Re-send it
+# on this cadence (comfortably under that ceiling) so it stays visible for the
+# whole background task, not just its first 25s — important for paths like
+# Knowledge retrieval (embeddings + Qdrant + optional VoyageAI rerank) on top
+# of the LLM call, which can together run past 25s.
+_TYPING_KEEPALIVE_INTERVAL_SECONDS = 20.0
+
+
+async def _typing_keepalive(sender: str, message_id: str) -> None:
+    """Re-send the typing indicator every `_TYPING_KEEPALIVE_INTERVAL_SECONDS`
+    until cancelled by the caller once the real reply is ready to send."""
+    try:
+        while True:
+            await asyncio.sleep(_TYPING_KEEPALIVE_INTERVAL_SECONDS)
+            try:
+                resp = send_whatsapp_typing_indicator(message_id)
+                if resp.status_code >= 400:
+                    logger.warning(
+                        "Typing indicator keepalive rejected sender=%s status=%s",
+                        sender, resp.status_code,
+                    )
+            except Exception:
+                logger.exception("Typing indicator keepalive failed for sender=%s", sender)
+    except asyncio.CancelledError:
+        pass
+
+
 async def _generate_response_and_update(
     sender: str,
     text: str,
@@ -109,6 +136,26 @@ async def _generate_response_and_update(
 ) -> None:
     """Background task: generate AI response (flow or knowledge) and update conversation asynchronously."""
     db_client = _conversation_client()
+
+    # Refresh the typing indicator at the start of the background task so the
+    # user sees it for the full duration of DB loads + response generation.
+    # This is especially important for the flow path which is fast/deterministic
+    # (no LLM wait) — the initial indicator from process_message may have
+    # already scrolled past the perception threshold by the time we send.
+    if isinstance(message_id, str) and message_id:
+        try:
+            _typing_resp = send_whatsapp_typing_indicator(message_id)
+            if _typing_resp.status_code >= 400:
+                logger.warning(
+                    "Background typing indicator rejected sender=%s status=%s",
+                    sender, _typing_resp.status_code,
+                )
+        except Exception:
+            logger.exception("Background typing indicator failed for sender=%s", sender)
+
+    keepalive_task: asyncio.Task[None] | None = None
+    if isinstance(message_id, str) and message_id:
+        keepalive_task = asyncio.create_task(_typing_keepalive(sender, message_id))
 
     try:
         # ── Load flow builder + admin notification toggles ──────────────────
@@ -514,10 +561,18 @@ async def _generate_response_and_update(
             ).execute()
 
         # ── Send all WhatsApp messages ─────────────────────────────────────
+        # Stop the keepalive first: WhatsApp dismisses the indicator once a
+        # message is sent, and we don't want a stray refresh racing past that.
+        if keepalive_task is not None:
+            keepalive_task.cancel()
+            keepalive_task = None
         _send_messages(sender, messages_to_send)
 
     except Exception:
         logger.exception("Background response generation failed for sender=%s", sender)
+    finally:
+        if keepalive_task is not None:
+            keepalive_task.cancel()
 
 
 async def process_message(data: Any) -> None:
