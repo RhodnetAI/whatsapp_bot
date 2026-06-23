@@ -1,6 +1,8 @@
 """Semantic retrieval for Products & Services, mirroring the knowledge-document
-RAG pattern in ``vectorizer.py`` (OpenAI embeddings + Qdrant, with a local JSON
-fallback when Qdrant isn't configured).
+RAG pattern in ``vectorizer.py`` (OpenAI embeddings + Qdrant). Qdrant is the
+only vector store — there is no local-file fallback, by design: a fallback
+that silently served stale/partial data was worse than surfacing "not
+configured" loudly.
 
 Each product/service row is embedded as a single point (no chunking — rows are
 short structured records), keyed by its own ``id`` so re-saving an item upserts
@@ -10,10 +12,8 @@ catalog into every prompt.
 """
 
 import asyncio
-import json
 import logging
-import math
-from pathlib import Path
+import os
 from typing import Any
 
 from openai import OpenAI
@@ -29,12 +29,17 @@ except ImportError:  # pragma: no cover
     AsyncQdrantClient = None
     qmodels = None
 
-VECTOR_STORE_DIR = Path(__file__).resolve().parents[1] / "data"
-VECTOR_STORE_PATH = VECTOR_STORE_DIR / "product_vectors.json"
 OPENAI_EMBEDDING_MODEL = settings.openai_embedding_model
 OPENAI_EMBEDDING_DIM = settings.openai_embedding_dim
 QDRANT_COLLECTION = settings.qdrant_product_collection
 QDRANT_VECTOR_NAME = "dense"
+
+# Dense search always returns the k-nearest vectors, however unrelated they
+# actually are to the query (e.g. "hello i am harish" still has *some*
+# closest products). A minimum cosine-similarity score keeps retrieval
+# query-based without falling back to keyword matching: genuinely relevant
+# matches clear this bar, small talk doesn't, so nothing gets injected.
+PRODUCT_SEARCH_SCORE_THRESHOLD = float(os.getenv("PRODUCT_SEARCH_SCORE_THRESHOLD", "0.3"))
 
 # Fields that carry an item's *meaning* for retrieval. Structured fields
 # (price/status/counts) are kept in the payload for prompt formatting but
@@ -58,35 +63,6 @@ _PAYLOAD_FIELDS = (
 )
 
 _qdrant_client_instance: Any = None
-
-
-def _ensure_vector_store_dir() -> None:
-    VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _load_vector_store() -> list[dict[str, Any]]:
-    _ensure_vector_store_dir()
-    if not VECTOR_STORE_PATH.exists():
-        return []
-    try:
-        raw = VECTOR_STORE_PATH.read_text(encoding="utf-8")
-        return json.loads(raw) if raw.strip() else []
-    except json.JSONDecodeError:
-        return []
-
-
-def _save_vector_store(items: list[dict[str, Any]]) -> None:
-    _ensure_vector_store_dir()
-    VECTOR_STORE_PATH.write_text(json.dumps(items, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(y * y for y in b))
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return dot / (norm_a * norm_b)
 
 
 def _build_embedding_text(fields: dict[str, Any]) -> str:
@@ -167,9 +143,9 @@ async def _ensure_qdrant_collection(client: Any) -> None:
 
 
 async def store_product_vector(item_id: str, fields: dict[str, Any]) -> None:
-    """Embed one product/service row and upsert it. The Qdrant point id is the
-    row's own ``id``, so saving the same item again overwrites its vector
-    in place instead of accumulating duplicates."""
+    """Embed one product/service row and upsert it into Qdrant. The point id
+    is the row's own ``id``, so saving the same item again overwrites its
+    vector in place instead of accumulating duplicates."""
     text = _build_embedding_text(fields)
     if not text:
         return
@@ -180,77 +156,54 @@ async def store_product_vector(item_id: str, fields: dict[str, Any]) -> None:
     embedding = embeddings[0]
     payload = _payload_for(fields)
 
-    stored_remote = False
     client = await _get_qdrant_client()
-    if client is not None and qmodels is not None:
-        await _ensure_qdrant_collection(client)
-        await client.upsert(
-            collection_name=QDRANT_COLLECTION,
-            points=[qmodels.PointStruct(id=item_id, vector={QDRANT_VECTOR_NAME: embedding}, payload=payload)],
-        )
-        stored_remote = True
+    if client is None or qmodels is None:
+        raise RuntimeError("Qdrant unavailable (QDRANT_URL not configured)")
 
-    items = _load_vector_store()
-    items = [item for item in items if str(item.get("id")) != str(item_id)]
-    items.append({**payload, "id": item_id, "embedding": embedding})
-    _save_vector_store(items)
-
-    if not stored_remote:
-        logger.warning("Qdrant unavailable; product/service %s vector stored to local fallback only", item_id)
+    await _ensure_qdrant_collection(client)
+    await client.upsert(
+        collection_name=QDRANT_COLLECTION,
+        points=[qmodels.PointStruct(id=item_id, vector={QDRANT_VECTOR_NAME: embedding}, payload=payload)],
+    )
 
 
 async def delete_product_vector(item_id: str) -> None:
     client = await _get_qdrant_client()
-    if client is not None and qmodels is not None:
-        try:
-            await client.delete(
-                collection_name=QDRANT_COLLECTION,
-                points_selector=qmodels.PointIdsList(points=[item_id]),
-            )
-        except Exception:
-            logger.warning("Failed to delete product/service vector %s from Qdrant", item_id)
-
-    items = _load_vector_store()
-    next_items = [item for item in items if str(item.get("id")) != str(item_id)]
-    if len(next_items) != len(items):
-        _save_vector_store(next_items)
+    if client is None or qmodels is None:
+        return
+    await client.delete(
+        collection_name=QDRANT_COLLECTION,
+        points_selector=qmodels.PointIdsList(points=[item_id]),
+    )
 
 
 async def search_products(query: str, top_k: int = 6) -> list[dict[str, Any]]:
-    """Semantic search over indexed product/service vectors, ranked by
-    relevance to ``query``. Returns payload dicts (DB-column-shaped) for the
-    top matches, or an empty list if embeddings are unavailable or nothing
-    has been indexed yet — callers should fall back to a bounded query in
-    that case rather than treating it as "no products exist"."""
+    """Semantic search over indexed product/service vectors in Qdrant, ranked
+    by relevance to ``query``. Returns payload dicts (DB-column-shaped) for
+    matches scoring at or above PRODUCT_SEARCH_SCORE_THRESHOLD. Returns an
+    empty list whenever Qdrant has nothing to offer — unrelated queries
+    (small talk, greetings), no embeddings configured, or Qdrant
+    unavailable — there is no other store to fall back to."""
     embeddings = await _create_embeddings([query])
     if not embeddings:
         return []
     query_embedding = embeddings[0]
 
     client = await _get_qdrant_client()
-    if client is not None and qmodels is not None:
-        await _ensure_qdrant_collection(client)
-        try:
-            results = await client.query_points(
-                collection_name=QDRANT_COLLECTION,
-                query=query_embedding,
-                using=QDRANT_VECTOR_NAME,
-                limit=top_k,
-                with_payload=True,
-            )
-            matches = [dict(point.payload) for point in results.points if point.payload]
-            if matches:
-                return matches
-        except Exception:
-            logger.exception("Qdrant product/service search failed")
+    if client is None or qmodels is None:
+        return []
 
-    items = _load_vector_store()
-    scored: list[tuple[float, dict[str, Any]]] = []
-    for item in items:
-        embedding = item.get("embedding")
-        if not isinstance(embedding, list):
-            continue
-        score = _cosine_similarity(query_embedding, embedding)
-        scored.append((score, item))
-    scored.sort(key=lambda entry: entry[0], reverse=True)
-    return [item for _, item in scored[:top_k]]
+    await _ensure_qdrant_collection(client)
+    try:
+        results = await client.query_points(
+            collection_name=QDRANT_COLLECTION,
+            query=query_embedding,
+            using=QDRANT_VECTOR_NAME,
+            limit=top_k,
+            score_threshold=PRODUCT_SEARCH_SCORE_THRESHOLD,
+            with_payload=True,
+        )
+        return [dict(point.payload) for point in results.points if point.payload]
+    except Exception:
+        logger.exception("Qdrant product/service search failed")
+        return []
