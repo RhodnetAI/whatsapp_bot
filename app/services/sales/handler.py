@@ -27,6 +27,7 @@ from typing import Any
 from app.core.config import settings
 from app.db.supabase_client import first_row, supabase, supabase_admin
 from app.services.whatsapp import send_whatsapp_message, send_whatsapp_typing_indicator
+from app.services import prompt_config
 from app.services.sales import ai_chat, messaging as m
 from app.services.sales import cart, catalog, conversational, orders, razorpay_service
 
@@ -893,6 +894,18 @@ async def _ai_intro(sender: str, cfg: dict[str, Any]):
     return [m.buttons(body, _ai_nav_buttons())], {"step": "ai_qa"}
 
 
+# Fallback for the Talk-to-AI catalog framing; live text in app_config
+# (sales_ai_catalog_prompt). [[BOT_NAME]]/[[CATALOG]] are filled in at runtime.
+_DEFAULT_CATALOG_PROMPT = (
+    "You are also the AI shopping assistant for [[BOT_NAME]], a WhatsApp store. "
+    "For questions about products, prices, or availability, answer using ONLY the "
+    "product catalog below. Be concise and friendly (2-4 short sentences, suitable "
+    "for WhatsApp). If something isn't in the catalog, say you don't carry it and "
+    "suggest browsing. Prices are final; never invent products or prices.\n\n"
+    "CATALOG:\n[[CATALOG]]"
+)
+
+
 def _build_catalog_section(cfg: dict[str, Any]) -> str:
     rows = catalog.fetch_active_rows()
     lines: list[str] = []
@@ -908,12 +921,9 @@ def _build_catalog_section(cfg: dict[str, Any]) -> str:
     catalog_text = "\n".join(lines) if lines else "(no products available)"
 
     return (
-        f"You are also the AI shopping assistant for {cfg['bot_name']}, a WhatsApp store. "
-        "For questions about products, prices, or availability, answer using ONLY the "
-        "product catalog below. Be concise and friendly (2-4 short sentences, suitable "
-        "for WhatsApp). If something isn't in the catalog, say you don't carry it and "
-        "suggest browsing. Prices are final; never invent products or prices.\n\n"
-        f"CATALOG:\n{catalog_text}"
+        prompt_config.get_prompt("sales_ai_catalog_prompt", _DEFAULT_CATALOG_PROMPT)
+        .replace("[[BOT_NAME]]", cfg["bot_name"])
+        .replace("[[CATALOG]]", catalog_text)
     )
 
 

@@ -10,6 +10,7 @@ from openai import OpenAI
 from pydantic import SecretStr
 from app.services.ai import generate_ai_reply
 from app.services.vectorizer import search_vectors
+from app.services import prompt_config
 from app.core.config import settings
 
 try:
@@ -96,6 +97,22 @@ _INTENT_COMBINED_SYSTEM_PROMPT = (
     "rewritten_query: standalone version with all pronouns and implicit references resolved using the chat history. If already standalone, repeat unchanged.\n\n"
     "Use 'general' only when certain no company knowledge is needed. When in doubt, use 'both'.\n\n"
     'Response format: {"source_filter": "<rag|web|both|general>", "rewritten_query": "<query>"}'
+)
+
+# Base instruction blocks for the answer prompts; the live text is stored in
+# app_config (knowledge_answer_prompt / general_answer_prompt) and these are the
+# fallbacks. Per-bot main_instruction / dos / donts are appended at runtime.
+_DEFAULT_KNOWLEDGE_ANSWER = (
+    "You are a knowledge-based assistant.\n"
+    "Answer the user's question only from the provided document excerpts.\n"
+    "If the exact answer is not contained in the excerpts, reply with: 'I don't have enough information to answer that.'\n"
+    "Do not hallucinate or invent information.\n"
+    "Cite only the provided excerpts and keep the answer concise."
+)
+
+_DEFAULT_GENERAL_ANSWER = (
+    "You are a helpful assistant.\n"
+    "Answer the user's question directly and politely."
 )
 
 _GREETING_RE = re.compile(
@@ -222,8 +239,11 @@ async def classify_knowledge_lead_label(
         try:
             groq = ChatGroq(model="llama-3.1-8b-instant", temperature=0, api_key=SecretStr(settings.groq_api_key))
             if HumanMessage and SystemMessage:
+                lead_prompt = prompt_config.get_prompt(
+                    "lead_label_classification_prompt", _LEAD_LABEL_CLASSIFICATION_PROMPT
+                )
                 result = await groq.ainvoke(
-                    [SystemMessage(content=_LEAD_LABEL_CLASSIFICATION_PROMPT), HumanMessage(content=history_block)]
+                    [SystemMessage(content=lead_prompt), HumanMessage(content=history_block)]
                 )
                 content = getattr(result, "content", "") or ""
                 payload = _sanitize_json(content)
@@ -254,12 +274,14 @@ async def _classify_and_rewrite_query(user_message: str, chat_history: Optional[
         f"History:\n{history_block}\nQuery:{user_message}" if history_block else f"Query:{user_message}"
     )
 
+    intent_prompt = prompt_config.get_prompt("knowledge_intent_combined_prompt", _INTENT_COMBINED_SYSTEM_PROMPT)
+
     if ChatGroq and settings.groq_api_key.strip() != "":
         try:
             groq = ChatGroq(model="llama-3.1-8b-instant", temperature=0, api_key=SecretStr(settings.groq_api_key))
             if HumanMessage and SystemMessage:
                 result = await groq.ainvoke(
-                    [SystemMessage(content=_INTENT_COMBINED_SYSTEM_PROMPT), HumanMessage(content=human_content)]
+                    [SystemMessage(content=intent_prompt), HumanMessage(content=human_content)]
                 )
                 parsed = getattr(result, "parsed", None) or {}
                 return QueryIntent(
@@ -276,7 +298,7 @@ async def _classify_and_rewrite_query(user_message: str, chat_history: Optional[
     response = await asyncio.to_thread(
         client.responses.create,
         model="gpt-5-nano-2025-08-07",
-        instructions=_INTENT_COMBINED_SYSTEM_PROMPT,
+        instructions=intent_prompt,
         input=human_content,
         reasoning={"effort": "minimal"},
         text={"verbosity": "low"},
@@ -294,13 +316,7 @@ async def _classify_and_rewrite_query(user_message: str, chat_history: Optional[
 
 
 def _build_knowledge_prompt(query: str, chunks: List[dict[str, Any]], setup_config: dict[str, str]) -> List[dict[str, str]]:
-    instruction_lines = [
-        "You are a knowledge-based assistant.",
-        "Answer the user's question only from the provided document excerpts.",
-        "If the exact answer is not contained in the excerpts, reply with: 'I don't have enough information to answer that.'",
-        "Do not hallucinate or invent information.",
-        "Cite only the provided excerpts and keep the answer concise.",
-    ]
+    instruction_lines = [prompt_config.get_prompt("knowledge_answer_prompt", _DEFAULT_KNOWLEDGE_ANSWER)]
 
     if setup_config.get("main_instruction"):
         instruction_lines.append(f"Main instruction: {setup_config['main_instruction']}")
@@ -327,10 +343,7 @@ def _build_knowledge_prompt(query: str, chunks: List[dict[str, Any]], setup_conf
 
 
 def _build_general_prompt(query: str, setup_config: dict[str, str]) -> List[dict[str, str]]:
-    instruction_lines = [
-        "You are a helpful assistant.",
-        "Answer the user's question directly and politely.",
-    ]
+    instruction_lines = [prompt_config.get_prompt("general_answer_prompt", _DEFAULT_GENERAL_ANSWER)]
 
     if setup_config.get("main_instruction"):
         instruction_lines.append(f"Main instruction: {setup_config['main_instruction']}")

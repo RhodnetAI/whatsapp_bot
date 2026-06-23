@@ -15,6 +15,8 @@ from app.models.schemas import (
     ProductServiceUpdate,
     ProductsServicesUploadStatusResponse,
 )
+from app.services.products_vectorizer import delete_product_vector, store_product_vector
+
 logger = logging.getLogger("whatsapp")
 
 TABLE_NAME = "information_bot_products_services"
@@ -98,7 +100,7 @@ async def _create_row(kind: str, fields: dict[str, str], source: str) -> Product
         "kind": kind,
         **fields,
         "source": source,
-        "vectorization_status": "done",
+        "vectorization_status": "processing",
         "created_at": now,
         "updated_at": now,
     }
@@ -107,20 +109,39 @@ async def _create_row(kind: str, fields: dict[str, str], source: str) -> Product
     return _row_to_item(row)
 
 
-async def create_item(payload: ProductServiceCreate) -> ProductServiceItem:
+async def _vectorize_item(item_id: str, fields: dict[str, Any]) -> str:
+    """Embed a product/service row and flip vectorization_status to done/failed
+    — run as a background task so create/update requests aren't blocked on an
+    embeddings API call. Returns the resulting status."""
+    try:
+        await store_product_vector(item_id, fields)
+        status = "done"
+    except Exception:
+        logger.exception("Failed to vectorize product/service %s", item_id)
+        status = "failed"
+    _db().table(TABLE_NAME).update({"vectorization_status": status}).eq("id", item_id).execute()
+    return status
+
+
+async def create_item(payload: ProductServiceCreate, background_tasks: BackgroundTasks) -> ProductServiceItem:
     fields = payload.model_dump(exclude={"kind"})
-    return await _create_row(payload.kind, fields, source="manual")
+    item = await _create_row(payload.kind, fields, source="manual")
+    background_tasks.add_task(_vectorize_item, item.id, fields)
+    return item
 
 
-async def update_item(item_id: str, payload: ProductServiceUpdate) -> ProductServiceItem:
+async def update_item(
+    item_id: str, payload: ProductServiceUpdate, background_tasks: BackgroundTasks
+) -> ProductServiceItem:
     existing = first_row(_db().table(TABLE_NAME).select("*").eq("id", item_id).execute())
     if existing is None:
         raise HTTPException(status_code=404, detail="Product/service not found")
 
     fields = payload.model_dump()
     now = datetime.now(timezone.utc).isoformat()
-    update_payload = {**fields, "vectorization_status": "done", "updated_at": now}
+    update_payload = {**fields, "vectorization_status": "processing", "updated_at": now}
     _db().table(TABLE_NAME).update(update_payload).eq("id", item_id).execute()
+    background_tasks.add_task(_vectorize_item, item_id, fields)
 
     return _row_to_item({**existing, **update_payload})
 
@@ -131,6 +152,28 @@ async def delete_item(item_id: str) -> None:
         raise HTTPException(status_code=404, detail="Product/service not found")
 
     _db().table(TABLE_NAME).delete().eq("id", item_id).execute()
+    try:
+        await delete_product_vector(item_id)
+    except Exception:
+        logger.warning("Failed to delete vector for product/service %s", item_id)
+
+
+async def reindex_all(background_tasks: BackgroundTasks) -> int:
+    """Backfill vectors for every existing row. Needed once after enabling
+    semantic retrieval: rows created before this change have
+    vectorization_status='done' (the old hardcoded value) but were never
+    actually embedded, so search_products() would find nothing for them
+    until they're individually edited or this is run."""
+    result = _db().table(TABLE_NAME).select("id, " + ", ".join(FIELD_NAMES)).execute()
+    rows = [row for row in (result.data or []) if isinstance(row, dict)]
+
+    for row in rows:
+        item_id = str(row.get("id"))
+        fields = {name: row.get(name) or "" for name in FIELD_NAMES}
+        _db().table(TABLE_NAME).update({"vectorization_status": "processing"}).eq("id", item_id).execute()
+        background_tasks.add_task(_vectorize_item, item_id, fields)
+
+    return len(rows)
 
 
 def _normalize_header(value: Any) -> str:
@@ -208,6 +251,7 @@ async def _process_upload_job(job_id: str, kind: str, rows: list[dict[str, str]]
     try:
         for fields in rows:
             item = await _create_row(kind, fields, source="excel")
+            item.vectorization_status = await _vectorize_item(item.id, fields)
             job["items"].append(item)
             job["processed"] += 1
         job["status"] = "done"

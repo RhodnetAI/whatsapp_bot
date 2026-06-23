@@ -4,6 +4,7 @@ from typing import Any
 
 from app.db.supabase_client import first_row, supabase, supabase_admin
 from app.services.ai import generate_ai_reply
+from app.services.products_vectorizer import search_products
 from app.services.vectorizer import search_knowledge_chunks
 
 logger = logging.getLogger("whatsapp")
@@ -230,20 +231,43 @@ def _build_company_info_section(bot: dict[str, Any], prompt_config: dict[str, st
     return "\n\n".join(blocks)
 
 
-async def _fetch_products_services_rows() -> list[dict[str, Any]]:
-    """Fetch every product/service row for injection into the Information
-    Agent's prompt (gated on products_services_enabled by the caller)."""
+PRODUCTS_SEARCH_TOP_K = 6
+PRODUCTS_FALLBACK_LIMIT = 8
+
+
+async def _fetch_products_services_fallback_rows(limit: int = PRODUCTS_FALLBACK_LIMIT) -> list[dict[str, Any]]:
+    """Bounded fallback used only when semantic search finds nothing — e.g.
+    embeddings aren't configured yet, or items haven't been (re)indexed since
+    this was wired in (see products_services.reindex_all). Capped the same
+    way the primary path is, so it can never balloon to the whole table."""
     try:
         result = (
             _db()
             .table(_PRODUCTS_SERVICES_TABLE)
             .select(", ".join(field for field, _ in _PRODUCT_SERVICE_FIELDS))
+            .order("created_at", desc=True)
+            .limit(limit)
             .execute()
         )
         return [row for row in (result.data or []) if isinstance(row, dict)]
     except Exception:
-        logger.exception("Failed to fetch products/services for prompt injection")
+        logger.exception("Failed to fetch fallback products/services for prompt injection")
         return []
+
+
+async def _fetch_products_services_rows(query: str) -> list[dict[str, Any]]:
+    """Query-based retrieval for the Information Agent's Products & Services
+    section: semantic search over indexed product/service vectors, ranked by
+    relevance to the user's message and capped to PRODUCTS_SEARCH_TOP_K —
+    instead of injecting the entire catalog into every prompt."""
+    try:
+        rows = await search_products(query, top_k=PRODUCTS_SEARCH_TOP_K)
+    except Exception:
+        logger.exception("Product/service semantic search failed")
+        rows = []
+    if rows:
+        return rows
+    return await _fetch_products_services_fallback_rows()
 
 
 def _format_product_service_item(row: dict[str, Any]) -> str:
@@ -365,7 +389,7 @@ async def generate_bot_reply(
             if section:
                 extra_sections.append(section)
         if bot["products_services_enabled"]:
-            rows = await _fetch_products_services_rows()
+            rows = await _fetch_products_services_rows(user_message)
             section = _build_products_services_section(prompt_config, rows)
             if section:
                 extra_sections.append(section)

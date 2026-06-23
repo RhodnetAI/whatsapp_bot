@@ -209,6 +209,11 @@ class ProductsServicesUploadStatusResponse(BaseModel):
     error: Optional[str] = None
 
 
+class ProductsServicesReindexResponse(BaseModel):
+    message: str
+    total: int
+
+
 class SchedulerItem(BaseModel):
     id: str
     day_of_week: str

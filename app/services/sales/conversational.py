@@ -26,6 +26,7 @@ from openai import OpenAI
 from openai.types.responses import ResponseInputParam
 
 from app.core.config import settings
+from app.services import prompt_config
 from app.services.sales import catalog
 from app.services.sales import messaging as m
 
@@ -45,6 +46,57 @@ _TARGET_STEPS = {"categories": "conv_categories", "products": "conv_products", "
 _MAX_CATALOG_LINES = 120
 _MAX_SHOWN = 40
 _HISTORY_TURNS = 4
+
+# ── Prompt fallbacks (live text in app_config; [[TOKEN]]s filled in at runtime) ─
+_DEFAULT_ENTRY_PROMPT = (
+    "You decide if a WhatsApp customer's message shows intent to buy or browse products, "
+    "or asks for help shopping (answer 'buy'), versus an unrelated/general message (answer "
+    "'unrelated'). Reply with ONLY a JSON object: {\"intent\": \"buy\" | \"unrelated\"}.\n\n"
+    "We sell (id | name | category | price | availability):\n[[CATALOG]]"
+)
+
+_DEFAULT_INTERPRETER_PROMPT = (
+    "You interpret a customer's message during a WhatsApp shopping conversation and output a "
+    "SINGLE strict JSON object describing what they want. Do not add any prose outside the JSON.\n\n"
+    "CURRENT STEP: [[STEP]]  (categories → products → confirm/cart → address → payment)\n"
+    "SESSION:\n[[SESSION]]\n\n"
+    "[[SHOWN]]\n\n"
+    "CATALOG (id | name | category | price | availability):\n[[CATALOG]]\n"
+    "CATEGORIES: [[CATEGORIES]]\n\n"
+    "Output JSON with these keys (include only what's relevant; omit or empty otherwise):\n"
+    '  "intent": one of select | set_quantity | change_quantity | remove | replace | add_more | '
+    "go_back | answer_doubt | confirm | cancel | unrelated\n"
+    '  "categories": [catalog category names the user referenced]\n'
+    '  "items": [{"product_id": "<name, shown number, or id>", "quantity": <int or null if unstated>}]\n'
+    '  "quantity_updates": [{"product_id": "<name/number/id>", "quantity": <int>}]  (change qty of a cart item)\n'
+    '  "removals": ["<name/number/id>"]\n'
+    '  "replacements": [{"from_id": "<name/number/id>", "to_id": "<name/number/id>", "quantity": <int or null>}]\n'
+    '  "target_step": "categories" | "products" | "confirm"   (only for go_back)\n'
+    '  "answer": "<concise friendly WhatsApp answer using ONLY catalog facts>"  (only for answer_doubt)\n\n'
+    "Rules:\n"
+    "- Use ONLY products/categories from the catalog above. Refer to a product by its exact name "
+    "or its shown number (preferred) — never invent one.\n"
+    "- When they name or refer to a product (by name, number, or description), put it in \"items\"; "
+    "set quantity to null if they didn't state one.\n"
+    "- Only include in \"items\"/\"removals\"/\"quantity_updates\" the products the user is changing in "
+    "THIS message. Do NOT echo items already in the cart that they didn't mention.\n"
+    "- A \"quantity\" in items is the TOTAL desired for that line, not an amount to add.\n"
+    "- intent=answer_doubt for any question/comparison/clarification (about products, categories, "
+    "prices, their order); put the full answer in \"answer\". Do NOT change their selections.\n"
+    "- intent=confirm ONLY when they clearly approve proceeding (e.g. 'confirm', 'yes go ahead', "
+    "'checkout', 'that's all'). Casual chit-chat like 'lol', 'ok cool', 'nice' is intent=unrelated, "
+    "NOT confirm.\n"
+    "- intent=cancel when they want to stop buying.\n"
+    "- intent=unrelated when the message is off-topic (not about shopping or their order).\n"
+    "- set_quantity when they give a number that answers the pending quantity question.\n"
+    "- Interpret freely — any phrasing/structure/style. React to meaning, not keywords."
+)
+
+_DEFAULT_ADDRESS_PROMPT = (
+    "Extract delivery address fields from the customer's message. Return ONLY a JSON object: "
+    '{"name": "", "address": "", "city": "", "pincode": ""}. Use an empty string for any field '
+    "not present. \"address\" is the house/street line. Do not invent values."
+)
 
 
 def _cat_of(row: dict[str, Any]) -> str:
@@ -174,11 +226,8 @@ async def classify_entry(message: str, conversation_data: list[dict[str, Any]], 
         return "buy"
 
     digest = _catalog_digest(rows, cfg.get("currency") or "INR")
-    system = (
-        "You decide if a WhatsApp customer's message shows intent to buy or browse products, "
-        "or asks for help shopping (answer 'buy'), versus an unrelated/general message (answer "
-        "'unrelated'). Reply with ONLY a JSON object: {\"intent\": \"buy\" | \"unrelated\"}.\n\n"
-        f"We sell (id | name | category | price | availability):\n{digest or '(no products)'}"
+    system = prompt_config.get_prompt("sales_conv_entry_prompt", _DEFAULT_ENTRY_PROMPT).replace(
+        "[[CATALOG]]", digest or "(no products)"
     )
     messages = [{"role": "system", "content": system}, *_recent_history(conversation_data),
                 {"role": "user", "content": raw}]
@@ -231,40 +280,12 @@ def _build_messages(step: str, message: str, state: dict[str, Any],
     digest = _catalog_digest(catalog.fetch_active_rows(), cfg.get("currency") or "INR")
     shown = _shown_block(step, state)
     system = (
-        "You interpret a customer's message during a WhatsApp shopping conversation and output a "
-        "SINGLE strict JSON object describing what they want. Do not add any prose outside the JSON.\n\n"
-        f"CURRENT STEP: {step}  (categories → products → confirm/cart → address → payment)\n"
-        f"SESSION:\n{_state_summary(state)}\n\n"
-        f"{shown}\n\n"
-        f"CATALOG (id | name | category | price | availability):\n{digest or '(no products)'}\n"
-        f"CATEGORIES: {', '.join(active_categories()) or '(none)'}\n\n"
-        "Output JSON with these keys (include only what's relevant; omit or empty otherwise):\n"
-        '  "intent": one of select | set_quantity | change_quantity | remove | replace | add_more | '
-        "go_back | answer_doubt | confirm | cancel | unrelated\n"
-        '  "categories": [catalog category names the user referenced]\n'
-        '  "items": [{"product_id": "<name, shown number, or id>", "quantity": <int or null if unstated>}]\n'
-        '  "quantity_updates": [{"product_id": "<name/number/id>", "quantity": <int>}]  (change qty of a cart item)\n'
-        '  "removals": ["<name/number/id>"]\n'
-        '  "replacements": [{"from_id": "<name/number/id>", "to_id": "<name/number/id>", "quantity": <int or null>}]\n'
-        '  "target_step": "categories" | "products" | "confirm"   (only for go_back)\n'
-        '  "answer": "<concise friendly WhatsApp answer using ONLY catalog facts>"  (only for answer_doubt)\n\n'
-        "Rules:\n"
-        "- Use ONLY products/categories from the catalog above. Refer to a product by its exact name "
-        "or its shown number (preferred) — never invent one.\n"
-        "- When they name or refer to a product (by name, number, or description), put it in \"items\"; "
-        "set quantity to null if they didn't state one.\n"
-        "- Only include in \"items\"/\"removals\"/\"quantity_updates\" the products the user is changing in "
-        "THIS message. Do NOT echo items already in the cart that they didn't mention.\n"
-        "- A \"quantity\" in items is the TOTAL desired for that line, not an amount to add.\n"
-        "- intent=answer_doubt for any question/comparison/clarification (about products, categories, "
-        "prices, their order); put the full answer in \"answer\". Do NOT change their selections.\n"
-        "- intent=confirm ONLY when they clearly approve proceeding (e.g. 'confirm', 'yes go ahead', "
-        "'checkout', 'that's all'). Casual chit-chat like 'lol', 'ok cool', 'nice' is intent=unrelated, "
-        "NOT confirm.\n"
-        "- intent=cancel when they want to stop buying.\n"
-        "- intent=unrelated when the message is off-topic (not about shopping or their order).\n"
-        "- set_quantity when they give a number that answers the pending quantity question.\n"
-        "- Interpret freely — any phrasing/structure/style. React to meaning, not keywords."
+        prompt_config.get_prompt("sales_conv_interpreter_prompt", _DEFAULT_INTERPRETER_PROMPT)
+        .replace("[[STEP]]", step)
+        .replace("[[SESSION]]", _state_summary(state))
+        .replace("[[SHOWN]]", shown)
+        .replace("[[CATALOG]]", digest or "(no products)")
+        .replace("[[CATEGORIES]]", ", ".join(active_categories()) or "(none)")
     )
     return [{"role": "system", "content": system}, *_recent_history(conversation_data),
             {"role": "user", "content": message}]
@@ -431,11 +452,7 @@ async def extract_address(message: str, partial: dict[str, Any]) -> dict[str, st
     """Pull delivery fields (name / address / city / pincode) from free text,
     merging with whatever is already known. Returns only the fields it found."""
     known = ", ".join(f"{k}={v}" for k, v in (partial or {}).items() if v)
-    system = (
-        "Extract delivery address fields from the customer's message. Return ONLY a JSON object: "
-        '{"name": "", "address": "", "city": "", "pincode": ""}. Use an empty string for any field '
-        "not present. \"address\" is the house/street line. Do not invent values."
-    )
+    system = prompt_config.get_prompt("sales_conv_address_prompt", _DEFAULT_ADDRESS_PROMPT)
     user = message if not known else f"Already known: {known}\nNew message: {message}"
     result = await _call_llm([{"role": "system", "content": system}, {"role": "user", "content": user}])
     if not isinstance(result, dict):

@@ -9,6 +9,7 @@ from app.models.schemas import (
     ProductServiceSaveResponse,
     ProductServiceUpdate,
     ProductsServicesListResponse,
+    ProductsServicesReindexResponse,
     ProductsServicesUploadStartResponse,
     ProductsServicesUploadStatusResponse,
 )
@@ -17,6 +18,7 @@ from app.services.products_services import (
     delete_item,
     get_upload_job_status,
     list_items,
+    reindex_all,
     start_excel_upload,
     update_item,
 )
@@ -30,8 +32,12 @@ async def get_items(token: dict = Depends(verify_token)):
 
 
 @router.post("", response_model=ProductServiceSaveResponse)
-async def create_product_or_service(payload: ProductServiceCreate, token: dict = Depends(verify_token)):
-    item = await create_item(payload)
+async def create_product_or_service(
+    payload: ProductServiceCreate,
+    background_tasks: BackgroundTasks,
+    token: dict = Depends(verify_token),
+):
+    item = await create_item(payload, background_tasks)
     return ProductServiceSaveResponse(item=item)
 
 
@@ -39,10 +45,19 @@ async def create_product_or_service(payload: ProductServiceCreate, token: dict =
 async def update_product_or_service(
     item_id: str,
     payload: ProductServiceUpdate,
+    background_tasks: BackgroundTasks,
     token: dict = Depends(verify_token),
 ):
-    item = await update_item(item_id, payload)
+    item = await update_item(item_id, payload, background_tasks)
     return ProductServiceSaveResponse(item=item)
+
+
+@router.post("/reindex", response_model=ProductsServicesReindexResponse)
+async def reindex_products_services(background_tasks: BackgroundTasks, token: dict = Depends(verify_token)):
+    """Backfill vectors for all existing rows — run once after deploying
+    semantic retrieval so previously-created items become searchable."""
+    total = await reindex_all(background_tasks)
+    return ProductsServicesReindexResponse(message="Reindexing started", total=total)
 
 
 @router.delete("/{item_id}", response_model=DeleteKnowledgeResponse)

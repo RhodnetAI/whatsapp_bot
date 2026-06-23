@@ -63,6 +63,7 @@ class Settings:
     qdrant_api_key: str
     qdrant_grpc_port: int | None
     qdrant_collection: str
+    qdrant_product_collection: str
     unstructured_api_key: str
     unstructured_api_url: str
     groq_api_key: str
@@ -107,6 +108,7 @@ settings = Settings(
     qdrant_api_key=os.getenv("QDRANT_API_KEY", ""),
     qdrant_grpc_port=int(os.getenv("QDRANT_GRPC_PORT", "0")) if os.getenv("QDRANT_GRPC_PORT") else None,
     qdrant_collection=os.getenv("QDRANT_COLLECTION", "agent_chunks_v2"),
+    qdrant_product_collection=os.getenv("QDRANT_PRODUCT_COLLECTION", "product_chunks_v2"),
     unstructured_api_key=os.getenv("UNSTRUCTURED_API_KEY", ""),
     unstructured_api_url=os.getenv("UNSTRUCTURED_API_URL", ""),
     groq_api_key=os.getenv("GROQ_API_KEY", ""),
