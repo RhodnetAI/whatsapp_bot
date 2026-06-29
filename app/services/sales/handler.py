@@ -666,7 +666,10 @@ def _seed_categories_from_items(state: dict[str, Any], items: list[dict[str, Any
     browses or goes back."""
     cats: list[str] = []
     for it in items:
-        row = catalog.get_row(it.get("product_id"))
+        pid = it.get("product_id")
+        if not pid:
+            continue
+        row = catalog.get_row(pid)
         if row:
             cat = _cat_of(row)
             if cat not in cats:
