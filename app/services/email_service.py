@@ -5,6 +5,7 @@ import logging
 import resend
 
 from app.core.config import settings
+from app.core.timezone import IST_LABEL, format_ist_datetime, to_ist
 
 logger = logging.getLogger("whatsapp")
 
@@ -25,8 +26,9 @@ def build_booking_body(
 
     Used for the WhatsApp follow-up message.
     """
-    date_label = meeting_datetime.strftime("%A, %B %d, %Y")
-    time_label = meeting_datetime.strftime("%I:%M %p")
+    ist_dt = to_ist(meeting_datetime)
+    date_label = ist_dt.strftime("%A, %B %d, %Y")
+    time_label = f"{ist_dt.strftime('%I:%M %p')} {IST_LABEL}"
     intro = (
         f"A meeting has been booked by {user_name}."
         if recipient_is_admin
@@ -137,8 +139,9 @@ def _build_email_html(
     """Build an HTML confirmation email styled to match the website's brand
     (primary purple #5b38f0, rounded cards, lavender accents — see
     frontend/src/index.css for the source design tokens)."""
-    date_label = meeting_datetime.strftime("%A, %B %d, %Y")
-    time_label = meeting_datetime.strftime("%I:%M %p")
+    ist_dt = to_ist(meeting_datetime)
+    date_label = ist_dt.strftime("%A, %B %d, %Y")
+    time_label = f"{ist_dt.strftime('%I:%M %p')} {IST_LABEL}"
 
     if recipient_is_admin:
         badge_glyph, kicker, title = "&#128197;", "New Booking", "Meeting Booked"
@@ -231,7 +234,7 @@ def send_meeting_confirmation(
         logger.info("Email notification toggle is off; skipping booking confirmation emails")
         return
 
-    when = meeting_datetime.strftime("%b %d, %Y %I:%M %p UTC")
+    when = format_ist_datetime(meeting_datetime)
 
     user_body = _build_email_html(
         user_name=user_name,

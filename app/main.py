@@ -16,6 +16,7 @@ from app.api.routes.schedule import router as schedule_router
 from app.api.routes.scheduler import router as scheduler_router
 from app.api.routes.setup import router as setup_router
 from app.api.routes.webhook import router as webhook_router
+from app.core.timezone import ist_today
 from app.db.supabase_client import supabase
 
 
@@ -47,7 +48,9 @@ app.add_middleware(
 
 @app.on_event("startup")
 def cleanup_old_messages() -> None:
-    cutoff_date = datetime.date.today() - datetime.timedelta(days=5)
+    # conversation_date tracks the IST calendar day (see migration 036); compute
+    # the retention cutoff on the same IST basis.
+    cutoff_date = ist_today() - datetime.timedelta(days=5)
     try:
         (
             supabase.table("whatsapp_conversations")

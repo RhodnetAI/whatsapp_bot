@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from app.core.config import settings
+from app.core.timezone import ist_walltime_to_utc
 from app.db.supabase_client import first_row, supabase, supabase_admin
 from app.services.bot_chat import generate_bot_reply, is_first_message_of_session
 from app.services.sales.handler import handle_sales_message
@@ -260,7 +261,7 @@ async def _generate_response_and_update(
 
             meeting_state = get_meeting_state(conversation_data) if scheduler_enabled else None
 
-            # A "session" is one calendar day (UTC), derived from prior entries
+            # A "session" is one calendar day (IST), derived from prior entries
             # in whatsapp_conversations — same definition as is_first_message_of_session
             # below. Reset any already-consumed suggestion (declined / completed /
             # exhausted-unanswered) at the start of a new day so the user gets a
@@ -309,9 +310,9 @@ async def _generate_response_and_update(
                     try:
                         slot_date = booking_data["slot_date"]
                         slot_start = booking_data["slot_start"]
-                        meeting_dt = datetime.datetime.fromisoformat(
-                            f"{slot_date}T{slot_start}:00+00:00"
-                        )
+                        # slot_start is IST wall-clock; build the true-UTC instant
+                        # used for storage, calendar, and confirmations.
+                        meeting_dt = ist_walltime_to_utc(str(slot_date), str(slot_start))
                         start_mins = int(slot_start.split(":")[0]) * 60 + int(slot_start.split(":")[1])
                         slot_end = booking_data.get("slot_end", "")
                         end_mins = int(slot_end.split(":")[0]) * 60 + int(slot_end.split(":")[1]) if slot_end else start_mins + 30

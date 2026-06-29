@@ -23,6 +23,7 @@ import logging
 import re
 from typing import Any, cast
 
+from app.core.timezone import IST_LABEL, ist_today, ist_walltime_to_utc
 from app.db.supabase_client import first_row, supabase, supabase_admin
 
 logger = logging.getLogger("whatsapp")
@@ -99,7 +100,7 @@ def is_declined_today(state: dict[str, Any]) -> bool:
         return False
     try:
         d = datetime.date.fromisoformat(str(declined_date))
-        return d == datetime.datetime.utcnow().date()
+        return d == ist_today()
     except ValueError:
         return False
 
@@ -151,10 +152,14 @@ def _generate_30min_slots(
 
 
 def _is_slot_booked(date_str: str, slot_start: str, slot_end: str) -> bool:
-    """Check whether this slot overlaps any existing booking in meeting_bookings."""
+    """Check whether this slot overlaps any existing booking in meeting_bookings.
+
+    The slot is an IST wall-clock window; convert it to true UTC so it lines up
+    with the UTC instants stored in meeting_bookings.meeting_datetime.
+    """
     try:
-        start_dt = datetime.datetime.fromisoformat(f"{date_str}T{slot_start}:00+00:00")
-        end_dt = datetime.datetime.fromisoformat(f"{date_str}T{slot_end}:00+00:00")
+        start_dt = ist_walltime_to_utc(date_str, slot_start)
+        end_dt = ist_walltime_to_utc(date_str, slot_end)
         # Fetch bookings that overlap: existing.start < our end AND existing.end > our start
         result = (
             _db()
@@ -194,7 +199,7 @@ def get_available_slots(days_ahead: int = 7) -> list[dict[str, str]]:
         logger.exception("Failed to fetch scheduler rows")
         return []
 
-    today = datetime.datetime.utcnow().date()
+    today = ist_today()
     available: list[dict[str, str]] = []
 
     for offset in range(days_ahead):
@@ -308,7 +313,7 @@ def _format_grouped_slots_message(slots: list[dict[str, str]]) -> str:
             "Please check back later."
         )
     grouped = _merge_slots_to_blocks(slots)
-    lines = ["Available slots:\n"]
+    lines = [f"Available slots (all times in {IST_LABEL}):\n"]
     for day_info in grouped.values():
         lines.append(f"*{day_info['day_label']}*")
         for block in day_info["blocks"]:
@@ -453,7 +458,7 @@ def _build_verification_message(partial: dict[str, Any]) -> str:
     msg = (
         "Please verify your booking details:\n\n"
         f"📅 Date:  {date_label}\n"
-        f"⏰ Time:  {slot_start} – {slot_end}\n"
+        f"⏰ Time:  {_format_time_12h(str(slot_start))} – {_format_time_12h(str(slot_end))} {IST_LABEL}\n"
         f"👤 Name:  {user_name}\n"
         f"📧 Email: {user_email}\n"
         f"📝 Purpose: {purpose}\n\n"
@@ -485,7 +490,8 @@ def save_booking(
         end_mins = _time_to_minutes(str(slot_end))
         duration = max(30, end_mins - start_mins)
 
-        meeting_dt = datetime.datetime.fromisoformat(f"{slot_date}T{slot_start}:00+00:00")
+        # slot_start is IST wall-clock; persist the equivalent true-UTC instant.
+        meeting_dt = ist_walltime_to_utc(str(slot_date), str(slot_start))
 
         row: dict[str, Any] = {
             "sender": sender,
@@ -568,7 +574,7 @@ def process_meeting_step(
             state["step"] = "asked_name"
             slot_label = (
                 f"{datetime.date.fromisoformat(selected['date']).strftime('%A, %b %d')} "
-                f"{_format_time_12h(selected['start'])} – {_format_time_12h(selected['end'])}"
+                f"{_format_time_12h(selected['start'])} – {_format_time_12h(selected['end'])} {IST_LABEL}"
             )
             return (
                 f"Great choice! I've noted *{slot_label}*.\n\n"
@@ -708,7 +714,7 @@ def handle_yes_no_response(
 
     if _NO_RE.match(text):
         state["step"] = "declined"
-        state["declined_date"] = datetime.datetime.utcnow().date().isoformat()
+        state["declined_date"] = ist_today().isoformat()
         return (
             "No problem at all! Feel free to ask me anything else.",
             state,

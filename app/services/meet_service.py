@@ -3,6 +3,7 @@ import json
 import logging
 
 from app.core.config import settings
+from app.core.timezone import IST_TZ_NAME, to_ist
 
 logger = logging.getLogger("whatsapp")
 
@@ -79,14 +80,12 @@ def _try_google_calendar_event(
         service = build("calendar", "v3", credentials=creds, cache_discovery=False)
 
         end_dt = meeting_datetime + datetime.timedelta(minutes=duration_minutes)
-        tz = settings.google_calendar_timezone or "Asia/Kolkata"
-        # meeting_datetime/end_dt carry the wall-clock time the user picked
-        # (e.g. 9:00 AM IST) but with a +00:00 offset attached purely as a
-        # storage convention. Strip the offset and let the Calendar API
-        # interpret the naive time using the explicit timeZone below, so the
-        # event lands at the time the user actually selected.
-        start_naive = meeting_datetime.replace(tzinfo=None)
-        end_naive = end_dt.replace(tzinfo=None)
+        tz = settings.google_calendar_timezone or IST_TZ_NAME
+        # meeting_datetime/end_dt are true-UTC instants. Convert to IST wall-clock
+        # and send the naive local time together with the explicit IST timeZone
+        # below, so the event lands at the time the user actually selected.
+        start_naive = to_ist(meeting_datetime).replace(tzinfo=None)
+        end_naive = to_ist(end_dt).replace(tzinfo=None)
         full_description = f"{description}\n\nGoogle Meet: {meet_link}" if description else f"Google Meet: {meet_link}"
         event_body: dict = {
             "summary": title,

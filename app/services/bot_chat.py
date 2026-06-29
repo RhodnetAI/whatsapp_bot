@@ -2,6 +2,7 @@ import datetime
 import logging
 from typing import Any
 
+from app.core.timezone import ist_today, to_ist
 from app.db.supabase_client import first_row, supabase, supabase_admin
 from app.services.ai import generate_ai_reply
 from app.services.products_vectorizer import search_products
@@ -143,17 +144,17 @@ def _entry_time(entry: dict[str, Any]) -> datetime.datetime | None:
 
 
 def is_first_message_of_session(prior_entries: list[dict[str, Any]]) -> bool:
-    """A session is one calendar day: the session has just started if none of
-    this conversation's prior entries (the JSON array minus the just-appended
-    current message) were sent earlier today (UTC), per whatsapp_conversations
+    """A session is one calendar day (IST): the session has just started if none
+    of this conversation's prior entries (the JSON array minus the just-appended
+    current message) were sent earlier today in IST, per whatsapp_conversations
     — the same day-based definition used previously, now derived from the
     conversation JSON instead of a separate history table."""
-    today = datetime.datetime.utcnow().date()
+    today = ist_today()
     for entry in prior_entries:
         if not isinstance(entry, dict):
             continue
         entry_time = _entry_time(entry)
-        if entry_time is not None and entry_time.date() == today:
+        if entry_time is not None and to_ist(entry_time).date() == today:
             return False
     return True
 

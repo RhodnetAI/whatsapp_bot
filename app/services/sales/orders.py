@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.core.timezone import ist_today
 from app.db.supabase_client import first_row, supabase, supabase_admin
 from app.services.sales import cart, catalog, catalog_sync
 
@@ -26,7 +27,9 @@ def _now() -> str:
 
 
 def generate_order_number() -> str:
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    # User-facing identifier; use the IST calendar date so the embedded date
+    # matches what the customer sees (the business operates in IST).
+    today = ist_today().strftime("%Y%m%d")
     return f"ORD-{today}-{secrets.token_hex(3).upper()}"
 
 

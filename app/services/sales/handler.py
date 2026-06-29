@@ -660,6 +660,20 @@ def _after_mutation(state: dict[str, Any], cfg: dict[str, Any]):
 
 
 # ── Entry (idle free text → buy vs unrelated) ────────────────────────────────
+def _seed_categories_from_items(state: dict[str, Any], items: list[dict[str, Any]]) -> None:
+    """Adopt the categories of any directly-named products as the selected
+    categories, so the products view stays coherent if the customer later
+    browses or goes back."""
+    cats: list[str] = []
+    for it in items:
+        row = catalog.get_row(it.get("product_id"))
+        if row:
+            cat = _cat_of(row)
+            if cat not in cats:
+                cats.append(cat)
+    _merge_categories(state, cats)
+
+
 async def _conv_entry(sender: str, text: str, cfg: dict[str, Any], conversation_data: list[dict[str, Any]]):
     intent = await conversational.classify_entry(text, conversation_data, cfg)
     if intent != "buy":
@@ -667,6 +681,30 @@ async def _conv_entry(sender: str, text: str, cfg: dict[str, Any], conversation_
     if not conversational.active_categories():
         return [m.text("No products are available right now. Please check back soon."), _main_menu(cfg)], _idle()
     state = {"step": "conv_categories", "selected_categories": [], "cart": [], "pending_quantity": []}
+
+    # If the very first message already names specific products (with or without a
+    # quantity) or a category, honour it and jump straight to the right step —
+    # don't restart the customer at the category list. The same interpreter and
+    # appliers that own in-flow turns decide what they asked for.
+    decision = await conversational.interpret_turn("conv_categories", text, state, conversation_data, cfg)
+    if decision.get("intent") not in ("cancel", "unrelated", "answer_doubt", "go_back"):
+        if decision.get("items"):
+            _seed_categories_from_items(state, decision["items"])
+        cart_before = _cart_snapshot(state)
+        pending_before = list(state.get("pending_quantity") or [])
+        _apply_cart_mutations(decision, state, cfg)
+        if decision.get("categories"):
+            _merge_categories(state, decision["categories"])
+        cart_changed = _cart_snapshot(state) != cart_before
+        pending_changed = (state.get("pending_quantity") or []) != pending_before
+        if cart_changed or pending_changed:
+            # Named a product (→ cart, or → ask its quantity).
+            return _after_mutation(state, cfg)
+        if state.get("selected_categories"):
+            # Named only a category → show its products.
+            state["step"] = "conv_products"
+            return _render_products_msgs(state, cfg), state
+
     return _render_categories_msgs(cfg), state
 
 
