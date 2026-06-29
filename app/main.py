@@ -10,6 +10,7 @@ from app.api.routes.health import router as health_router
 from app.api.routes.knowledge import router as knowledge_router
 from app.api.routes.flow_store import router as flow_store_router
 from app.api.routes.products_services import router as products_services_router
+from app.api.routes.push import router as push_router
 from app.api.routes.razorpay_webhook import router as razorpay_router
 from app.api.routes.sales import router as sales_router
 from app.api.routes.schedule import router as schedule_router
@@ -72,6 +73,7 @@ app.include_router(clients_router)
 app.include_router(setup_router)
 app.include_router(knowledge_router)
 app.include_router(products_services_router)
+app.include_router(push_router)
 app.include_router(scheduler_router)
 app.include_router(schedule_router)
 app.include_router(sales_router)

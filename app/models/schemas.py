@@ -31,6 +31,11 @@ class SenderActionRequest(BaseModel):
     sender: str
 
 
+class PushRegisterRequest(BaseModel):
+    token: str
+    platform: str | None = None
+
+
 class ToggleClientRequest(BaseModel):
     sender: str
     bookmarked: bool | None = None

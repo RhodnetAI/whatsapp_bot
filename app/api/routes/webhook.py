@@ -41,6 +41,7 @@ from app.services.email_service import (
     send_meeting_confirmation,
 )
 from app.services.meet_service import create_meeting_event
+from app.services.push_service import send_push_to_all
 
 
 router = APIRouter(tags=["webhook"])
@@ -623,6 +624,23 @@ async def process_message(data: Any) -> None:
         return
     if not sender.startswith("+"):
         sender = f"+{sender}"
+
+    # ── Push notification to the receiver app ───────────────────────────────
+    # Fire-and-forget so the admin is alerted for every inbound message (text,
+    # interactive, order, etc.) even when the app is closed. Runs off the
+    # request path via a thread so it never delays the webhook response.
+    try:
+        push_preview = ""
+        _text_field = message.get("text")
+        if isinstance(_text_field, dict):
+            push_preview = _text_field.get("body", "") or ""
+        if not push_preview:
+            push_preview = f"New {message_type or 'message'}"
+        asyncio.create_task(
+            asyncio.to_thread(send_push_to_all, sender, push_preview, sender)
+        )
+    except Exception:
+        logger.exception("Failed to enqueue push notification for sender=%s", sender)
 
     # ── Routing fork: the Sales Bot owns its own pipeline end-to-end ─────────
     # (interactive lists/buttons, native-cart `order` messages, Flow replies).
