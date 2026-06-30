@@ -119,21 +119,88 @@ def parse_incoming(message: dict[str, Any]) -> dict[str, Any]:
 
 
 def _summarize_outgoing(msgs: list[dict[str, Any]]) -> str:
-    """A plain-text rendering of the outgoing messages for the dashboard view."""
-    parts: list[str] = []
-    for msg in msgs:
-        t = msg.get("type")
-        if t == "text":
-            parts.append((msg.get("text") or {}).get("body", ""))
-        elif t == "image":
-            parts.append("[image] " + ((msg.get("image") or {}).get("caption") or ""))
-        elif t == "interactive":
-            inter = msg.get("interactive") or {}
-            body = (inter.get("body") or {}).get("text", "")
-            parts.append(body or f"[{inter.get('type')}]")
-        else:
-            parts.append(f"[{t}]")
-    return "\n\n".join(p for p in parts if p).strip()
+    """A text rendering of the outgoing messages for the dashboard / app view.
+
+    The goal is fidelity: whatever the customer sees on WhatsApp — menu lists and
+    their rows, reply buttons, CTA/Flow buttons, image captions — is reproduced
+    here so the chat window mirrors the real conversation rather than showing a
+    bare ``[interactive]`` stub.
+    """
+    return "\n\n".join(s for s in (_render_outgoing(m) for m in msgs) if s).strip()
+
+
+def _render_outgoing(msg: dict[str, Any]) -> str:
+    t = msg.get("type")
+
+    if t == "text":
+        return ((msg.get("text") or {}).get("body") or "").strip()
+
+    if t == "image":
+        caption = ((msg.get("image") or {}).get("caption") or "").strip()
+        return f"🖼️ {caption}" if caption else "🖼️ [image]"
+
+    if t == "interactive":
+        return _render_interactive(msg.get("interactive") or {})
+
+    return f"[{t}]"
+
+
+def _render_interactive(inter: dict[str, Any]) -> str:
+    itype = inter.get("type")
+    lines: list[str] = []
+
+    header = inter.get("header") or {}
+    if header.get("type") == "text" and header.get("text"):
+        lines.append(str(header["text"]).strip())
+    elif header.get("type") == "image":
+        lines.append("🖼️ [image]")
+
+    body = (inter.get("body") or {}).get("text")
+    if body:
+        lines.append(str(body).strip())
+
+    action = inter.get("action") or {}
+
+    if itype == "button":
+        titles = [
+            (b.get("reply") or {}).get("title", "")
+            for b in (action.get("buttons") or [])
+        ]
+        chips = "  ".join(f"[ {tt} ]" for tt in titles if tt)
+        if chips:
+            lines.append(chips)
+
+    elif itype == "list":
+        button_text = action.get("button")
+        if button_text:
+            lines.append(f"📋 {button_text}")
+        for sec in action.get("sections") or []:
+            sec_title = (sec.get("title") or "").strip()
+            if sec_title:
+                lines.append(f"*{sec_title}*")
+            for row in sec.get("rows") or []:
+                title = (row.get("title") or "").strip()
+                desc = (row.get("description") or "").strip()
+                lines.append(f"• {title} — {desc}" if desc else f"• {title}")
+
+    elif itype == "cta_url":
+        params = action.get("parameters") or {}
+        label = params.get("display_text") or "Open link"
+        url = params.get("url") or ""
+        lines.append(f"🔗 {label}" + (f" → {url}" if url else ""))
+
+    elif itype == "flow":
+        params = action.get("parameters") or {}
+        cta = params.get("flow_cta") or "Open"
+        lines.append(f"⚡ {cta}")
+
+    elif itype in ("product_list", "product"):
+        lines.append("🛍️ [catalog products]")
+
+    elif not lines:
+        lines.append(f"[{itype}]")
+
+    return "\n".join(s for s in lines if s).strip()
 
 
 # ── Config ───────────────────────────────────────────────────────────────────
