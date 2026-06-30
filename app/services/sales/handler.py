@@ -225,22 +225,14 @@ async def load_sales_config() -> dict[str, Any]:
 
 # ── Menu & navigation ────────────────────────────────────────────────────────
 def _main_menu(cfg: dict[str, Any]) -> dict[str, Any]:
-    # Path B: once the "Open Store" data-exchange Flow is configured, the menu
-    # collapses to two rows — the Flow covers browse/cart/track/checkout in one
-    # in-app sheet. Without it (no encryption keypair / Flow published yet) we
-    # fall back to the chat-based browsing rows, so the bot still works fully.
-    if cfg.get("store_flow_id"):
-        rows = [
-            m.list_row(m.MENU_STORE, "🏬 Open Store", "Browse, cart, track & checkout"),
-            m.list_row(m.MENU_AI, "🤖 Talk to AI", "Ask about our products"),
-        ]
-    else:
-        rows = [
-            m.list_row(m.MENU_BROWSE, "🛍️ Browse products", "See what's available"),
-            m.list_row(m.MENU_CART, "🛒 View cart", "Review items & checkout"),
-            m.list_row(m.MENU_TRACK, "📦 Track order", "Check an order's status"),
-            m.list_row(m.MENU_AI, "🤖 Talk to AI", "Ask about our products"),
-        ]
+    # The menu only ever offers "Open Store" and "Talk to AI". Browse, cart,
+    # track & checkout all live INSIDE the Open Store Flow (one multi-screen
+    # in-app sheet) — the individual chat-based browse/cart screens are no
+    # longer sent to the user.
+    rows = [
+        m.list_row(m.MENU_STORE, "🏬 Open Store", "Browse, cart, track & checkout"),
+        m.list_row(m.MENU_AI, "🤖 Talk to AI", "Ask about our products"),
+    ]
     return m.list_message(
         body=WELCOME,
         button_text="Menu",
@@ -253,9 +245,9 @@ async def _open_store(sender: str, cfg: dict[str, Any]):
     data-exchange endpoint) handles browse/cart/track/checkout; we only step back
     into chat at the very end for the Razorpay payment link."""
     if not cfg.get("store_flow_id"):
-        # Shouldn't happen (the row is only shown when configured), but degrade
-        # gracefully to the chat browse path.
-        return await _browse_categories(sender, cfg)
+        # Flow not configured. We no longer fall back to the individual chat
+        # browse screens — surface a short message instead of sending them.
+        return [m.text("Our store isn't available right now. Please check back soon, or type *menu*.")], _idle()
     return [m.store_flow(flow_id=cfg["store_flow_id"], sender=sender)], _idle()
 
 
@@ -993,7 +985,7 @@ async def _handle_conv_turn(sender: str, text: str, prev_state: dict[str, Any],
 
 # ── Talk to AI (LLM Q&A over the catalog) ────────────────────────────────────
 def _ai_nav_buttons() -> list[tuple[str, str]]:
-    return [(m.MENU_BROWSE, "🛍️ Browse products"), (m.FLOW_EXIT, "🏠 Main menu")]
+    return [(m.MENU_STORE, "🏬 Open Store"), (m.FLOW_EXIT, "🏠 Main menu")]
 
 
 async def _ai_intro(sender: str, cfg: dict[str, Any]):
@@ -1297,12 +1289,16 @@ async def _handle_track(sender: str, text: str, cfg: dict[str, Any]):
 
 # ── Reply dispatch ───────────────────────────────────────────────────────────
 async def _handle_reply(sender: str, rid: str, state: dict[str, Any], cfg: dict[str, Any]):
+    # Browsing & the cart live inside the "Open Store" Flow (one multi-screen
+    # in-app sheet). The individual chat-based browse/cart screens (browse
+    # categories, nav lists, product cards, cart management) are no longer sent —
+    # every browse/cart entry point opens the Store Flow instead.
     if rid == m.MENU_STORE:
         return await _open_store(sender, cfg)
     if rid == m.MENU_BROWSE:
-        return await _browse_categories(sender, cfg)
+        return await _open_store(sender, cfg)
     if rid == m.MENU_CART:
-        return await _view_cart(sender, cfg)
+        return await _open_store(sender, cfg)
     if rid == m.MENU_TRACK:
         return _ask_track()
     if rid == m.MENU_AI:
@@ -1331,7 +1327,7 @@ async def _handle_reply(sender: str, rid: str, state: dict[str, Any], cfg: dict[
         return await _cart_remove(sender, rid[len(m.RM_PREFIX):], cfg)
     # Unknown id: stay in the flow if shopping, otherwise show the menu.
     if state.get("step") == "shopping":
-        return await _browse_categories(sender, cfg)
+        return await _open_store(sender, cfg)
     return _menu_messages(cfg, greet=False), _idle()
 
 
