@@ -1402,6 +1402,39 @@ def _reset_sales_state(sender: str) -> None:
         logger.exception("Sales: failed to reset state for sender=%s", sender)
 
 
+def _append_bot_message(sender: str, text: str) -> None:
+    """Persist a proactively-sent bot message (one not triggered by an inbound
+    message — e.g. the post-payment confirmation) into the conversation array so
+    it shows up in the dashboard/app exactly as the customer received it.
+
+    Stored as a standalone entry with an empty ``query`` so the chat window
+    renders it as a bot bubble with no preceding customer bubble."""
+    if not sender or not text:
+        return
+    db = _db()
+    try:
+        existing = (
+            db.table("whatsapp_conversations").select("id, conversation").eq("sender", sender).execute()
+        )
+        row = first_row(existing)
+        conv = (row.get("conversation") if row else None) or []
+        if not isinstance(conv, list):
+            conv = []
+        now_iso = datetime.now(timezone.utc).isoformat()
+        conv.append({"query": "", "response": text, "time": now_iso})
+        if row:
+            db.table("whatsapp_conversations").update(
+                {"conversation": conv, "updated_at": now_iso, "unread": True}
+            ).eq("id", row["id"]).execute()
+        else:
+            db.table("whatsapp_conversations").upsert(
+                {"sender": sender, "client_name": sender, "conversation": conv, "updated_at": now_iso, "unread": True},
+                on_conflict="sender",
+            ).execute()
+    except Exception:
+        logger.exception("Sales: failed to append bot message for sender=%s", sender)
+
+
 # ── Public entry point ───────────────────────────────────────────────────────
 async def handle_sales_message(sender: str, message: dict[str, Any], message_id: str | None) -> None:
     # Drop duplicate webhook deliveries (Meta retries) so a single Flow
@@ -1518,8 +1551,12 @@ async def notify_order_paid(order: dict[str, Any]) -> None:
         lines.append(f"• {it['name']} ×{it['quantity']}")
     lines.append(f"\nTotal paid: *{m.format_money(order.get('total_minor') or 0, currency)}*")
     lines.append("\nWe'll start preparing your order. Type *menu* anytime to track it. 🙏")
+    confirmation_text = "\n".join(lines)
     try:
-        send_whatsapp_message(order["sender"], m.text("\n".join(lines)))
+        send_whatsapp_message(order["sender"], m.text(confirmation_text))
+        # Persist it so the dashboard/app show it too (it's sent outside the
+        # normal inbound→reply cycle, so nothing else records it).
+        _append_bot_message(order.get("sender") or "", confirmation_text)
     except Exception:
         logger.exception("Failed to send paid confirmation for order=%s", order.get("order_number"))
 

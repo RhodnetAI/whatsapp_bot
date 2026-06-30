@@ -494,9 +494,15 @@ async def _generate_response_and_update(
             lead_label = get_flow_lead_label(updated_flow_state or flow_state, flow_builder)
             messages_to_send = [ai_reply]
 
-        # ── Persist primary reply in conversation array ────────────────────
+        # ── Persist the reply in conversation array ─────────────────────────
+        # Store EVERYTHING actually sent to the user (session greeting, the AI
+        # reply, meeting suggestion / re-ask, and the full booking-details
+        # message) — not just ``ai_reply`` — so the dashboard/app mirror WhatsApp.
         if conversation_data and isinstance(conversation_data[-1], dict):
-            conversation_data[-1]["response"] = ai_reply
+            full_reply = "\n\n".join(
+                msg for msg in messages_to_send if isinstance(msg, str) and msg.strip()
+            )
+            conversation_data[-1]["response"] = full_reply or ai_reply
 
         # ── Save flow confirmation if just completed ───────────────────────
         if flow_enabled and record_id and isinstance(updated_flow_state, dict) and updated_flow_state.get("completed"):
